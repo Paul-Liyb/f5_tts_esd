@@ -23,7 +23,20 @@ from f5_tts.model.modules import (
     precompute_freqs_cis,
 )
 
+# === 新增：Emotion Embedding ===
+class EmotionEmbedding(nn.Module):
+    def __init__(self, num_embeds, dim):
+        super().__init__()
+        # +1 用于处理 drop_emotion (CFG) 或者 padding
+        self.embed = nn.Embedding(num_embeds + 1, dim)
+        nn.init.zeros_(self.embed.weight)
 
+    def forward(self, idx, drop_emotion=False):
+        # 假设 idx 是 emotion IDs
+        if drop_emotion:
+            # 如果做 CFG (Classifier Free Guidance)，丢弃条件时返回 0 向量
+            return torch.zeros_like(self.embed(idx))
+        return self.embed(idx)
 # text embedding
 
 
@@ -96,6 +109,7 @@ class MMDiT(nn.Module):
         text_num_embeds=256,
         text_mask_padding=True,
         qk_norm=None,
+        emotion_num_embeds=6, # 默认 5 个情感 + 1 个预留
     ):
         super().__init__()
 
@@ -103,6 +117,7 @@ class MMDiT(nn.Module):
         self.text_embed = TextEmbedding(dim, text_num_embeds, mask_padding=text_mask_padding)
         self.text_cond, self.text_uncond = None, None  # text cache
         self.audio_embed = AudioEmbedding(mel_dim, dim)
+        self.emotion_embed = EmotionEmbedding(emotion_num_embeds, dim)
 
         self.rotary_embed = RotaryEmbedding(dim_head)
 
@@ -175,9 +190,11 @@ class MMDiT(nn.Module):
         cond: float["b n d"],  # masked cond audio
         text: int["b nt"],  # text
         time: float["b"] | float[""],  # time step
+        emotion: int["b"] | None = None,  # emotion id
         mask: bool["b n"] | None = None,
         drop_audio_cond: bool = False,  # cfg for cond audio
         drop_text: bool = False,  # cfg for text
+        drop_emotion: bool = False,  # cfg for emotion
         cfg_infer: bool = False,  # cfg inference, pack cond & uncond forward
         cache: bool = False,
     ):
@@ -187,12 +204,26 @@ class MMDiT(nn.Module):
 
         # t: conditioning (time), c: context (text + masked cond audio), x: noised input audio
         t = self.time_embed(time)
+        if emotion is not None:
+            e = self.emotion_embed(emotion, drop_emotion=drop_emotion)
+            t = t + e
+
         if cfg_infer:  # pack cond & uncond forward: b n d -> 2b n d
             x_cond, c_cond = self.get_input_embed(x, cond, text, drop_audio_cond=False, drop_text=False, cache=cache)
             x_uncond, c_uncond = self.get_input_embed(x, cond, text, drop_audio_cond=True, drop_text=True, cache=cache)
             x = torch.cat((x_cond, x_uncond), dim=0)
             c = torch.cat((c_cond, c_uncond), dim=0)
-            t = torch.cat((t, t), dim=0)
+            t_base = self.time_embed(time)
+            if emotion is not None:
+                e_cond = self.emotion_embed(emotion, drop_emotion=False)
+                e_uncond = self.emotion_embed(emotion, drop_emotion=True)
+                t_cound = t_base + e_cond
+                t_uncond = t_base + e_uncond
+            else:
+                t_cound = t_base
+                t_uncond = t_base
+
+            t = torch.cat((t_cound, t_uncond), dim=0)
             mask = torch.cat((mask, mask), dim=0) if mask is not None else None
         else:
             x, c = self.get_input_embed(

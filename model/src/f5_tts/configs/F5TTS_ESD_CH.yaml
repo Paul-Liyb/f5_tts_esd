@@ -1,0 +1,53 @@
+hydra:
+  run:
+    # 修改 ckpts 保存路径，方便你查找
+    dir: ckpts/${datasets.name}/${now:%Y-%m-%d}_${now:%H-%M-%S}
+
+datasets:
+  name: ESD_CH  # <=== 【修改1】改成你的数据集名称 (不要带 _pinyin 后缀)
+  batch_size_per_gpu: 9600  # <=== 【修改2】微调时显存可能吃紧，建议改小，或者使用 frame 模式
+  batch_size_type: frame    # 推荐使用 frame 模式
+  max_samples: 64 
+  num_workers: 8
+
+optim:
+  epochs: 100               # 微调通常不需要太多 Epoch，但可以设大一点手动停止
+  learning_rate: 1e-5       # <=== 【修改3】微调的学习率建议比预训练(7.5e-5)小
+  num_warmup_updates: 1000  # 微调预热步数可以减少
+  grad_accumulation_steps: 1
+  max_grad_norm: 1.0
+  bnb_optimizer: False
+
+model:
+  name: F5TTS_v1_Base
+  tokenizer: pinyin
+  tokenizer_path: /home/jovyan/boomcheng-work-shcdt/liyangbo/CODE/test/dit/data/ESD_CH_pinyin/vocab.txt
+  backbone: DiT
+  arch:
+    dim: 1024
+    depth: 22
+    heads: 16
+    ff_mult: 2
+    text_dim: 512
+    conv_layers: 4
+    attn_backend: torch
+    emotion_num_embeds: 6 
+
+  mel_spec:
+    target_sample_rate: 24000
+    n_mel_channels: 100
+    hop_length: 256
+    win_length: 1024
+    n_fft: 1024
+    mel_spec_type: vocos
+  vocoder:
+    is_local: False
+    local_path: null
+
+ckpts:
+  logger: wandb
+  log_samples: True
+  save_per_updates: 10000 
+  keep_last_n_checkpoints: 5 
+  last_per_updates: 1000
+  save_dir: ckpts/${datasets.name}

@@ -64,7 +64,7 @@ def graceful_exit():
             executor.shutdown(wait=False)
 
 
-def process_audio_file(audio_path, text, polyphone):
+def process_audio_file(audio_path, text, emotion, polyphone):
     """Process a single audio file by checking its existence and extracting duration."""
     if not Path(audio_path).exists():
         print(f"audio {audio_path} not found, skipping")
@@ -73,7 +73,7 @@ def process_audio_file(audio_path, text, polyphone):
         audio_duration = get_audio_duration(audio_path)
         if audio_duration <= 0:
             raise ValueError(f"Duration {audio_duration} is non-positive.")
-        return (audio_path, text, audio_duration)
+        return (audio_path, text, audio_duration, emotion)
     except Exception as e:
         print(f"Warning: Failed to process {audio_path} due to error: {e}. Skipping corrupt file.")
         return None
@@ -94,6 +94,7 @@ def prepare_csv_wavs_dir(input_dir, num_workers=None):
     assert is_csv_wavs_format(input_dir), f"not csv_wavs format: {input_dir}"
     input_dir = Path(input_dir)
     metadata_path = input_dir / "metadata.csv"
+    
     audio_path_text_pairs = read_audio_text_pairs(metadata_path.as_posix())
 
     polyphone = True
@@ -115,7 +116,7 @@ def prepare_csv_wavs_dir(input_dir, num_workers=None):
             for i in range(0, len(audio_path_text_pairs), CHUNK_SIZE):
                 chunk = audio_path_text_pairs[i : i + CHUNK_SIZE]
                 # Submit futures in order
-                chunk_futures = [executor.submit(process_audio_file, pair[0], pair[1], polyphone) for pair in chunk]
+                chunk_futures = [executor.submit(process_audio_file, pair[0], pair[1], pair[2], polyphone) for pair in chunk]
 
                 # Iterate over futures in the original submission order to preserve ordering
                 for future in tqdm(
@@ -146,8 +147,8 @@ def prepare_csv_wavs_dir(input_dir, num_workers=None):
     durations = []
     vocab_set = set()
 
-    for (audio_path, _, duration), conv_text in zip(processed, converted_texts):
-        sub_result.append({"audio_path": audio_path, "text": conv_text, "duration": duration})
+    for (audio_path, _, duration, emotion), conv_text in zip(processed, converted_texts):
+        sub_result.append({"audio_path": audio_path, "text": conv_text, "duration": duration, "emotion":emotion})
         durations.append(duration)
         vocab_set.update(list(conv_text))
 
@@ -192,9 +193,17 @@ def read_audio_text_pairs(csv_file_path):
     parent = Path(csv_file_path).parent
     with open(csv_file_path, mode="r", newline="", encoding="utf-8-sig") as csvfile:
         reader = csv.reader(csvfile, delimiter="|")
-        next(reader)  # Skip the header row
-        for row in reader:
-            if len(row) >= 2:
+        # next(reader)  # Skip the header row
+        for i,row in enumerate(reader):
+            # if i < 3:
+            #     print(f"读取第 {i} 行: {row}")
+            if len(row) == 3:
+                audio_file = row[0].strip()  # First column: audio file path
+                text = row[1].strip()  # Second column: text
+                emotion = row[2].strip() # Third column: emotion
+                audio_file_path = parent / audio_file
+                audio_text_pairs.append((audio_file_path.as_posix(), text, emotion))
+            elif len(row) == 2:
                 audio_file = row[0].strip()  # First column: audio file path
                 text = row[1].strip()  # Second column: text
                 audio_file_path = parent / audio_file

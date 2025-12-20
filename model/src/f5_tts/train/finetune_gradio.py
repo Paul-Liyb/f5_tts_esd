@@ -378,14 +378,19 @@ def start_training(
     yield "start train", gr.update(interactive=False), gr.update(interactive=False)
 
     # Command to run the training script with the specified arguments
-
-    if tokenizer_file == "":
-        if dataset_name.endswith("_pinyin"):
-            tokenizer_type = "pinyin"
-        elif dataset_name.endswith("_char"):
-            tokenizer_type = "char"
-    else:
-        tokenizer_type = "custom"
+    if dataset_name.endswith("_pinyin"):
+        tokenizer_type = "pinyin"
+    elif dataset_name.endswith("_char"):
+        tokenizer_type = "char"
+    elif tokenizer_file != "":
+         tokenizer_type = "pinyin"
+    # if tokenizer_file == "":
+    #     if dataset_name.endswith("_pinyin"):
+    #         tokenizer_type = "pinyin"
+    #     elif dataset_name.endswith("_char"):
+    #         tokenizer_type = "char"
+    # else:
+    #     tokenizer_type = "custom"
 
     dataset_name = dataset_name.replace("_pinyin", "").replace("_char", "")
 
@@ -1160,7 +1165,7 @@ def get_random_sample_infer(project_name):
 
 
 def infer(
-    project, file_checkpoint, exp_name, ref_text, ref_audio, gen_text, nfe_step, use_ema, speed, seed, remove_silence
+    project, file_checkpoint, exp_name, ref_text, ref_audio, gen_text, nfe_step, use_ema, speed, seed, remove_silence, emotion_name
 ):
     global last_checkpoint, last_device, tts_api, last_ema
 
@@ -1192,7 +1197,13 @@ def infer(
 
     if seed == -1:  # -1 used for random
         seed = None
-
+    emo_map = {"Angry": 0, "Happy": 1, "Neutral": 2, "Sad":3, "Surprise":4}
+    emotion_id = emo_map.get(emotion_name, 2)  # Default to Neutral if not found
+    emotion_tensor = torch.tensor([emotion_id], device=tts_api.device)
+    output_dir = "outputs"
+    os.makedirs(output_dir, exist_ok=True)
+    import time
+    filename = os.path.join(output_dir, f"gen_{emotion_name}_{int(time.time())}.wav")
     with tempfile.NamedTemporaryFile(delete=False, suffix=".wav") as f:
         tts_api.infer(
             ref_file=ref_audio,
@@ -1201,11 +1212,11 @@ def infer(
             nfe_step=nfe_step,
             speed=speed,
             remove_silence=remove_silence,
-            file_wave=f.name,
+            file_wave=filename,
             seed=seed,
+            emotion=emotion_tensor,
         )
-        return f.name, tts_api.device, str(tts_api.seed)
-
+        return filename, tts_api.device, str(tts_api.seed)
 
 def check_finetune(finetune):
     return gr.update(interactive=finetune), gr.update(interactive=finetune), gr.update(interactive=finetune)
@@ -1765,6 +1776,12 @@ Check the use_ema setting (True or False) for your model to see what works best 
                 speed = gr.Slider(label="Speed", value=1.0, minimum=0.3, maximum=2.0, step=0.1)
                 seed = gr.Number(label="Random Seed", value=-1, minimum=-1)
                 remove_silence = gr.Checkbox(label="Remove Silence")
+                emotion_dropdown = gr.Dropdown(
+                    label="Emotion",
+                    choices=["Angry", "Happy", "Neutral", "Sad", "Surprise"],
+                    value="Neutral",
+                    info="Select the emotion for the generated speech",
+                )
 
             with gr.Row():
                 ch_use_ema = gr.Checkbox(
@@ -1806,6 +1823,7 @@ Check the use_ema setting (True or False) for your model to see what works best 
                     speed,
                     seed,
                     remove_silence,
+                    emotion_dropdown,
                 ],
                 outputs=[gen_audio, txt_info_gpu, seed_info],
             )

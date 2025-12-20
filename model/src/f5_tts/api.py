@@ -1,6 +1,7 @@
 import random
 import sys
 from importlib.resources import files
+import torch
 
 import soundfile as sf
 import tqdm
@@ -113,6 +114,7 @@ class F5TTS:
         file_wave=None,
         file_spec=None,
         seed=None,
+        emotion=torch.tensor([2], device=None),
     ):
         if seed is None:
             seed = random.randint(0, sys.maxsize)
@@ -138,6 +140,7 @@ class F5TTS:
             speed=speed,
             fix_duration=fix_duration,
             device=self.device,
+            emotion=emotion,
         )
 
         if file_wave is not None:

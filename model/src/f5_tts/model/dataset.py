@@ -131,7 +131,10 @@ class CustomDataset(Dataset):
             audio_path = row["audio_path"]
             text = row["text"]
             duration = row["duration"]
-
+            raw_emotion = row["emotion"] 
+            emo_map = {"Angry": 0, "Happy": 1, "Neutral": 2, "Sad":3, "Surprise":4}
+            # emo_map = {"Angry": 0, "Happy": 1, "Neutral": 2, "Sad":3, "Surprise":4}
+            emotion = emo_map.get(raw_emotion, 2) # 默认为2
             # filter by given length
             if 0.3 <= duration <= 30:
                 break  # valid
@@ -159,6 +162,7 @@ class CustomDataset(Dataset):
         return {
             "mel_spec": mel_spec,
             "text": text,
+            "emotion":emotion,
         }
 
 
@@ -321,10 +325,13 @@ def collate_fn(batch):
 
     text = [item["text"] for item in batch]
     text_lengths = torch.LongTensor([len(item) for item in text])
-
+    emotions = [item["emotion"] for item in batch] 
+    emotion_tensor = torch.LongTensor(emotions)
+    
     return dict(
         mel=mel_specs,
         mel_lengths=mel_lengths,  # records for padding mask
         text=text,
         text_lengths=text_lengths,
+        emotion=emotion_tensor,
     )

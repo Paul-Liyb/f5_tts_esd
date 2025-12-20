@@ -27,7 +27,7 @@ def parse_args():
         "--exp_name",
         type=str,
         default="F5TTS_v1_Base",
-        choices=["F5TTS_v1_Base", "F5TTS_Base", "E2TTS_Base"],
+        choices=["F5TTS_v1_Base", "F5TTS_Base", "E2TTS_Base","F5TTS_v1_Base_ESD"],
         help="Experiment name",
     )
     parser.add_argument("--dataset_name", type=str, default="Emilia_ZH_EN", help="Name of the dataset to use")

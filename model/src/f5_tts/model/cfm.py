@@ -99,6 +99,8 @@ class CFM(nn.Module):
         duplicate_test=False,
         t_inter=0.1,
         edit_mask=None,
+        drop_emotion=False,
+        **kwargs
     ):
         self.eval()
         # raw wave
@@ -174,6 +176,7 @@ class CFM(nn.Module):
                     drop_audio_cond=False,
                     drop_text=False,
                     cache=True,
+                    **kwargs
                 )
                 return pred
 
@@ -186,6 +189,7 @@ class CFM(nn.Module):
                 mask=mask,
                 cfg_infer=True,
                 cache=True,
+                **kwargs
             )
             pred, null_pred = torch.chunk(pred_cfg, 2, dim=0)
             return pred + (pred - null_pred) * cfg_strength
@@ -235,6 +239,7 @@ class CFM(nn.Module):
         *,
         lens: int["b"] | None = None,
         noise_scheduler: str | None = None,
+        **kwargs
     ):
         # handle raw wave
         if inp.ndim == 2:
@@ -292,7 +297,7 @@ class CFM(nn.Module):
 
         # apply mask will use more memory; might adjust batchsize or batchsampler long sequence threshold
         pred = self.transformer(
-            x=φ, cond=cond, text=text, time=time, drop_audio_cond=drop_audio_cond, drop_text=drop_text, mask=mask
+            x=φ, cond=cond, text=text, time=time, drop_audio_cond=drop_audio_cond, drop_text=drop_text, mask=mask, **kwargs
         )
 
         # flow matching loss

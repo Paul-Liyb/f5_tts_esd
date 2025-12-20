@@ -180,260 +180,291 @@ class Trainer:
                         print(f"Removed old checkpoint: {oldest_checkpoint}")
 
     def load_checkpoint(self):
-        if (
-            not exists(self.checkpoint_path)
-            or not os.path.exists(self.checkpoint_path)
-            or not any(filename.endswith((".pt", ".safetensors")) for filename in os.listdir(self.checkpoint_path))
-        ):
-            return 0
+            if (
+                not exists(self.checkpoint_path)
+                or not os.path.exists(self.checkpoint_path)
+                or not any(filename.endswith((".pt", ".safetensors")) for filename in os.listdir(self.checkpoint_path))
+            ):
+                return 0
 
-        self.accelerator.wait_for_everyone()
-        if "model_last.pt" in os.listdir(self.checkpoint_path):
-            latest_checkpoint = "model_last.pt"
-        else:
-            # Updated to consider pretrained models for loading but prioritize training checkpoints
-            all_checkpoints = [
-                f
-                for f in os.listdir(self.checkpoint_path)
-                if (f.startswith("model_") or f.startswith("pretrained_")) and f.endswith((".pt", ".safetensors"))
-            ]
-
-            # First try to find regular training checkpoints
-            training_checkpoints = [f for f in all_checkpoints if f.startswith("model_") and f != "model_last.pt"]
-            if training_checkpoints:
-                latest_checkpoint = sorted(
-                    training_checkpoints,
-                    key=lambda x: int("".join(filter(str.isdigit, x))),
-                )[-1]
+            self.accelerator.wait_for_everyone()
+            if "model_last.pt" in os.listdir(self.checkpoint_path):
+                latest_checkpoint = "model_last.pt"
             else:
-                # If no training checkpoints, use pretrained model
-                latest_checkpoint = next(f for f in all_checkpoints if f.startswith("pretrained_"))
+                all_checkpoints = [
+                    f
+                    for f in os.listdir(self.checkpoint_path)
+                    if (f.startswith("model_") or f.startswith("pretrained_")) and f.endswith((".pt", ".safetensors"))
+                ]
+                training_checkpoints = [f for f in all_checkpoints if f.startswith("model_") and f != "model_last.pt"]
+                if training_checkpoints:
+                    latest_checkpoint = sorted(
+                        training_checkpoints,
+                        key=lambda x: int("".join(filter(str.isdigit, x))),
+                    )[-1]
+                else:
+                    latest_checkpoint = next(f for f in all_checkpoints if f.startswith("pretrained_"))
 
-        if latest_checkpoint.endswith(".safetensors"):  # always a pretrained checkpoint
-            from safetensors.torch import load_file
+            print(f"Loading checkpoint: {latest_checkpoint}...")
+            
+            if latest_checkpoint.endswith(".safetensors"):
+                from safetensors.torch import load_file
+                checkpoint = load_file(f"{self.checkpoint_path}/{latest_checkpoint}", device="cpu")
+                checkpoint = {"ema_model_state_dict": checkpoint}
+            elif latest_checkpoint.endswith(".pt"):
+                checkpoint = torch.load(
+                    f"{self.checkpoint_path}/{latest_checkpoint}", weights_only=True, map_location="cpu"
+                )
 
-            checkpoint = load_file(f"{self.checkpoint_path}/{latest_checkpoint}", device="cpu")
-            checkpoint = {"ema_model_state_dict": checkpoint}
-        elif latest_checkpoint.endswith(".pt"):
-            # checkpoint = torch.load(f"{self.checkpoint_path}/{latest_checkpoint}", map_location=self.accelerator.device)  # rather use accelerator.load_state ಥ_ಥ
-            checkpoint = torch.load(
-                f"{self.checkpoint_path}/{latest_checkpoint}", weights_only=True, map_location="cpu"
-            )
+            # patch for backward compatibility
+            for key in ["ema_model.mel_spec.mel_stft.mel_scale.fb", "ema_model.mel_spec.mel_stft.spectrogram.window"]:
+                if key in checkpoint["ema_model_state_dict"]:
+                    del checkpoint["ema_model_state_dict"][key]
 
-        # patch for backward compatibility, 305e3ea
-        for key in ["ema_model.mel_spec.mel_stft.mel_scale.fb", "ema_model.mel_spec.mel_stft.spectrogram.window"]:
-            if key in checkpoint["ema_model_state_dict"]:
-                del checkpoint["ema_model_state_dict"][key]
+            if self.is_main:
+                # === 修改点 1: strict=False 用于 EMA 模型 ===
+                # 这允许加载没有 emotion_embed 的旧权重
+                missing_keys, unexpected_keys = self.ema_model.load_state_dict(checkpoint["ema_model_state_dict"], strict=False)
+                
+                # 验证: 确保 emotion_embed 是 missing 的，或者是已存在的 (如果是 resume 训练)
+                if missing_keys:
+                    print(f"EMA Model missing keys (expected for new layers): {missing_keys}")
+                    # 再次确认新层是否为 0 (Zero Initialization)
+                    if hasattr(self.ema_model, "emotion_embed"):
+                        is_zero = torch.all(self.ema_model.emotion_embed.embed.weight == 0)
+                        print(f"EMA Emotion Embed is zero-initialized: {is_zero}")
 
-        if self.is_main:
-            self.ema_model.load_state_dict(checkpoint["ema_model_state_dict"])
+            if "update" in checkpoint or "step" in checkpoint:
+                if "step" in checkpoint:
+                    checkpoint["update"] = checkpoint["step"] // self.grad_accumulation_steps
+                    
+                for key in ["mel_spec.mel_stft.mel_scale.fb", "mel_spec.mel_stft.spectrogram.window"]:
+                    if key in checkpoint["model_state_dict"]:
+                        del checkpoint["model_state_dict"][key]
 
-        if "update" in checkpoint or "step" in checkpoint:
-            # patch for backward compatibility, with before f992c4e
-            if "step" in checkpoint:
-                checkpoint["update"] = checkpoint["step"] // self.grad_accumulation_steps
-                if self.grad_accumulation_steps > 1 and self.is_main:
-                    print(
-                        "F5-TTS WARNING: Loading checkpoint saved with per_steps logic (before f992c4e), will convert to per_updates according to grad_accumulation_steps setting, may have unexpected behaviour."
-                    )
-            # patch for backward compatibility, 305e3ea
-            for key in ["mel_spec.mel_stft.mel_scale.fb", "mel_spec.mel_stft.spectrogram.window"]:
-                if key in checkpoint["model_state_dict"]:
-                    del checkpoint["model_state_dict"][key]
+                # === 修改点 2: strict=False 用于主模型 ===
+                self.accelerator.unwrap_model(self.model).load_state_dict(checkpoint["model_state_dict"], strict=False)
+                
+                # === 修改点 3: 优化器加载的容错处理 ===
+                # 如果你从一个没有 emotion 的 checkpoint 恢复，优化器的参数数量会不匹配，导致报错。
+                try:
+                    self.optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
+                    if self.scheduler:
+                        self.scheduler.load_state_dict(checkpoint["scheduler_state_dict"])
+                except ValueError as e:
+                    print(f"WARNING: Optimizer state dict mismatch (likely due to new emotion parameters). Resetting optimizer state. Error: {e}")
+                    # 这种情况下，我们保留 update 步数，但优化器从头开始
+                
+                update = checkpoint["update"]
+            else:
+                checkpoint["model_state_dict"] = {
+                    k.replace("ema_model.", ""): v
+                    for k, v in checkpoint["ema_model_state_dict"].items()
+                    if k not in ["initted", "update", "step"]
+                }
+                # === 修改点 4: strict=False 用于预训练模型加载 ===
+                self.accelerator.unwrap_model(self.model).load_state_dict(checkpoint["model_state_dict"], strict=False)
+                update = 0
 
-            self.accelerator.unwrap_model(self.model).load_state_dict(checkpoint["model_state_dict"])
-            self.optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
-            if self.scheduler:
-                self.scheduler.load_state_dict(checkpoint["scheduler_state_dict"])
-            update = checkpoint["update"]
-        else:
-            checkpoint["model_state_dict"] = {
-                k.replace("ema_model.", ""): v
-                for k, v in checkpoint["ema_model_state_dict"].items()
-                if k not in ["initted", "update", "step"]
-            }
-            self.accelerator.unwrap_model(self.model).load_state_dict(checkpoint["model_state_dict"])
-            update = 0
-
-        del checkpoint
-        gc.collect()
-        return update
+            del checkpoint
+            gc.collect()
+            return update
 
     def train(self, train_dataset: Dataset, num_workers=16, resumable_with_seed: int = None):
-        if self.log_samples:
-            from f5_tts.infer.utils_infer import cfg_strength, load_vocoder, nfe_step, sway_sampling_coef
+            if self.log_samples:
+                from f5_tts.infer.utils_infer import cfg_strength, load_vocoder, nfe_step, sway_sampling_coef
 
-            vocoder = load_vocoder(
-                vocoder_name=self.vocoder_name, is_local=self.is_local_vocoder, local_path=self.local_vocoder_path
-            )
-            target_sample_rate = self.accelerator.unwrap_model(self.model).mel_spec.target_sample_rate
-            log_samples_path = f"{self.checkpoint_path}/samples"
-            os.makedirs(log_samples_path, exist_ok=True)
+                vocoder = load_vocoder(
+                    vocoder_name=self.vocoder_name, is_local=self.is_local_vocoder, local_path=self.local_vocoder_path
+                )
+                target_sample_rate = self.accelerator.unwrap_model(self.model).mel_spec.target_sample_rate
+                log_samples_path = f"{self.checkpoint_path}/samples"
+                os.makedirs(log_samples_path, exist_ok=True)
 
-        if exists(resumable_with_seed):
-            generator = torch.Generator()
-            generator.manual_seed(resumable_with_seed)
-        else:
-            generator = None
-
-        if self.batch_size_type == "sample":
-            train_dataloader = DataLoader(
-                train_dataset,
-                collate_fn=collate_fn,
-                num_workers=num_workers,
-                pin_memory=True,
-                persistent_workers=True,
-                batch_size=self.batch_size_per_gpu,
-                shuffle=True,
-                generator=generator,
-            )
-        elif self.batch_size_type == "frame":
-            self.accelerator.even_batches = False
-            sampler = SequentialSampler(train_dataset)
-            batch_sampler = DynamicBatchSampler(
-                sampler,
-                self.batch_size_per_gpu,
-                max_samples=self.max_samples,
-                random_seed=resumable_with_seed,  # This enables reproducible shuffling
-                drop_residual=False,
-            )
-            train_dataloader = DataLoader(
-                train_dataset,
-                collate_fn=collate_fn,
-                num_workers=num_workers,
-                pin_memory=True,
-                persistent_workers=True,
-                batch_sampler=batch_sampler,
-            )
-        else:
-            raise ValueError(f"batch_size_type must be either 'sample' or 'frame', but received {self.batch_size_type}")
-
-        #  accelerator.prepare() dispatches batches to devices;
-        #  which means the length of dataloader calculated before, should consider the number of devices
-        warmup_updates = (
-            self.num_warmup_updates * self.accelerator.num_processes
-        )  # consider a fixed warmup steps while using accelerate multi-gpu ddp
-        # otherwise by default with split_batches=False, warmup steps change with num_processes
-        total_updates = math.ceil(len(train_dataloader) / self.grad_accumulation_steps) * self.epochs
-        decay_updates = total_updates - warmup_updates
-        warmup_scheduler = LinearLR(self.optimizer, start_factor=1e-8, end_factor=1.0, total_iters=warmup_updates)
-        decay_scheduler = LinearLR(self.optimizer, start_factor=1.0, end_factor=1e-8, total_iters=decay_updates)
-        self.scheduler = SequentialLR(
-            self.optimizer, schedulers=[warmup_scheduler, decay_scheduler], milestones=[warmup_updates]
-        )
-        train_dataloader, self.scheduler = self.accelerator.prepare(
-            train_dataloader, self.scheduler
-        )  # actual multi_gpu updates = single_gpu updates / gpu nums
-        start_update = self.load_checkpoint()
-        global_update = start_update
-
-        if exists(resumable_with_seed):
-            orig_epoch_step = len(train_dataloader)
-            start_step = start_update * self.grad_accumulation_steps
-            skipped_epoch = int(start_step // orig_epoch_step)
-            skipped_batch = start_step % orig_epoch_step
-            skipped_dataloader = self.accelerator.skip_first_batches(train_dataloader, num_batches=skipped_batch)
-        else:
-            skipped_epoch = 0
-
-        for epoch in range(skipped_epoch, self.epochs):
-            self.model.train()
-            if exists(resumable_with_seed) and epoch == skipped_epoch:
-                progress_bar_initial = math.ceil(skipped_batch / self.grad_accumulation_steps)
-                current_dataloader = skipped_dataloader
+            if exists(resumable_with_seed):
+                generator = torch.Generator()
+                generator.manual_seed(resumable_with_seed)
             else:
-                progress_bar_initial = 0
-                current_dataloader = train_dataloader
+                generator = None
 
-            # Set epoch for the batch sampler if it exists
-            if hasattr(train_dataloader, "batch_sampler") and hasattr(train_dataloader.batch_sampler, "set_epoch"):
-                train_dataloader.batch_sampler.set_epoch(epoch)
+            if self.batch_size_type == "sample":
+                train_dataloader = DataLoader(
+                    train_dataset,
+                    collate_fn=collate_fn,
+                    num_workers=num_workers,
+                    pin_memory=True,
+                    persistent_workers=True,
+                    batch_size=self.batch_size_per_gpu,
+                    shuffle=True,
+                    generator=generator,
+                )
+            elif self.batch_size_type == "frame":
+                self.accelerator.even_batches = False
+                sampler = SequentialSampler(train_dataset)
+                batch_sampler = DynamicBatchSampler(
+                    sampler,
+                    self.batch_size_per_gpu,
+                    max_samples=self.max_samples,
+                    random_seed=resumable_with_seed,
+                    drop_residual=False,
+                )
+                train_dataloader = DataLoader(
+                    train_dataset,
+                    collate_fn=collate_fn,
+                    num_workers=num_workers,
+                    pin_memory=True,
+                    persistent_workers=True,
+                    batch_sampler=batch_sampler,
+                )
+            else:
+                raise ValueError(f"batch_size_type must be either 'sample' or 'frame', but received {self.batch_size_type}")
 
-            progress_bar = tqdm(
-                range(math.ceil(len(train_dataloader) / self.grad_accumulation_steps)),
-                desc=f"Epoch {epoch + 1}/{self.epochs}",
-                unit="update",
-                disable=not self.accelerator.is_local_main_process,
-                initial=progress_bar_initial,
+            warmup_updates = (
+                self.num_warmup_updates * self.accelerator.num_processes
             )
+            total_updates = math.ceil(len(train_dataloader) / self.grad_accumulation_steps) * self.epochs
+            decay_updates = total_updates - warmup_updates
+            warmup_scheduler = LinearLR(self.optimizer, start_factor=1e-8, end_factor=1.0, total_iters=warmup_updates)
+            decay_scheduler = LinearLR(self.optimizer, start_factor=1.0, end_factor=1e-8, total_iters=decay_updates)
+            self.scheduler = SequentialLR(
+                self.optimizer, schedulers=[warmup_scheduler, decay_scheduler], milestones=[warmup_updates]
+            )
+            train_dataloader, self.scheduler = self.accelerator.prepare(
+                train_dataloader, self.scheduler
+            )
+            start_update = self.load_checkpoint()
+            global_update = start_update
 
-            for batch in current_dataloader:
-                with self.accelerator.accumulate(self.model):
-                    text_inputs = batch["text"]
-                    mel_spec = batch["mel"].permute(0, 2, 1)
-                    mel_lengths = batch["mel_lengths"]
+            if exists(resumable_with_seed):
+                orig_epoch_step = len(train_dataloader)
+                start_step = start_update * self.grad_accumulation_steps
+                skipped_epoch = int(start_step // orig_epoch_step)
+                skipped_batch = start_step % orig_epoch_step
+                skipped_dataloader = self.accelerator.skip_first_batches(train_dataloader, num_batches=skipped_batch)
+            else:
+                skipped_epoch = 0
 
-                    # TODO. add duration predictor training
-                    if self.duration_predictor is not None and self.accelerator.is_local_main_process:
-                        dur_loss = self.duration_predictor(mel_spec, lens=batch.get("durations"))
-                        self.accelerator.log({"duration loss": dur_loss.item()}, step=global_update)
+            for epoch in range(skipped_epoch, self.epochs):
+                self.model.train()
+                if exists(resumable_with_seed) and epoch == skipped_epoch:
+                    progress_bar_initial = math.ceil(skipped_batch / self.grad_accumulation_steps)
+                    current_dataloader = skipped_dataloader
+                else:
+                    progress_bar_initial = 0
+                    current_dataloader = train_dataloader
 
-                    loss, cond, pred = self.model(
-                        mel_spec, text=text_inputs, lens=mel_lengths, noise_scheduler=self.noise_scheduler
-                    )
-                    self.accelerator.backward(loss)
+                if hasattr(train_dataloader, "batch_sampler") and hasattr(train_dataloader.batch_sampler, "set_epoch"):
+                    train_dataloader.batch_sampler.set_epoch(epoch)
 
-                    if self.max_grad_norm > 0 and self.accelerator.sync_gradients:
-                        self.accelerator.clip_grad_norm_(self.model.parameters(), self.max_grad_norm)
+                progress_bar = tqdm(
+                    range(math.ceil(len(train_dataloader) / self.grad_accumulation_steps)),
+                    desc=f"Epoch {epoch + 1}/{self.epochs}",
+                    unit="update",
+                    disable=not self.accelerator.is_local_main_process,
+                    initial=progress_bar_initial,
+                )
 
-                    self.optimizer.step()
-                    self.scheduler.step()
-                    self.optimizer.zero_grad()
+                for batch in current_dataloader:
+                    with self.accelerator.accumulate(self.model):
+                        text_inputs = batch["text"]
+                        mel_spec = batch["mel"].permute(0, 2, 1)
+                        mel_lengths = batch["mel_lengths"]
+                        
+                        # === 修改点 1: 获取 Emotion ===
+                        emotion = batch["emotion"]
+                        
+                        # === 修改点 2: 生成 Drop Mask (CFG) ===
+                        # 10% 的概率丢弃 emotion 条件，这对于训练 CFG 能力至关重要
+                        # 如果不drop，推理时如果不给emotion可能会效果很差
+                        drop_emotion = torch.rand(mel_spec.shape[0], device=self.accelerator.device) < 0.1
 
-                if self.accelerator.sync_gradients:
-                    if self.is_main:
-                        self.ema_model.update()
+                        if self.duration_predictor is not None and self.accelerator.is_local_main_process:
+                            dur_loss = self.duration_predictor(mel_spec, lens=batch.get("durations"))
+                            self.accelerator.log({"duration loss": dur_loss.item()}, step=global_update)
 
-                    global_update += 1
-                    progress_bar.update(1)
-                    progress_bar.set_postfix(update=str(global_update), loss=loss.item())
+                        # === 修改点 3: 传入 Emotion 和 Drop Mask ===
+                        # 注意：F5-TTS 的 self.model 通常是一个 FlowMatching Wrapper
+                        # 该 Wrapper 会将所有额外的 kwargs (**kwargs) 传递给内部的 MMDiT
+                        # 所以这里直接传 emotion 和 drop_emotion 是安全的
+                        loss, cond, pred = self.model(
+                            mel_spec, 
+                            text=text_inputs, 
+                            lens=mel_lengths, 
+                            noise_scheduler=self.noise_scheduler,
+                            emotion=emotion,           # <--- 传入
+                            drop_emotion=drop_emotion  # <--- 传入
+                        )
+                        self.accelerator.backward(loss)
 
-                if self.accelerator.is_local_main_process:
-                    self.accelerator.log(
-                        {"loss": loss.item(), "lr": self.scheduler.get_last_lr()[0]}, step=global_update
-                    )
-                    if self.logger == "tensorboard":
-                        self.writer.add_scalar("loss", loss.item(), global_update)
-                        self.writer.add_scalar("lr", self.scheduler.get_last_lr()[0], global_update)
+                        if self.max_grad_norm > 0 and self.accelerator.sync_gradients:
+                            self.accelerator.clip_grad_norm_(self.model.parameters(), self.max_grad_norm)
 
-                if global_update % self.last_per_updates == 0 and self.accelerator.sync_gradients:
-                    self.save_checkpoint(global_update, last=True)
+                        self.optimizer.step()
+                        self.scheduler.step()
+                        self.optimizer.zero_grad()
 
-                if global_update % self.save_per_updates == 0 and self.accelerator.sync_gradients:
-                    self.save_checkpoint(global_update)
+                    if self.accelerator.sync_gradients:
+                        if self.is_main:
+                            self.ema_model.update()
 
-                    if self.log_samples and self.accelerator.is_local_main_process:
-                        ref_audio_len = mel_lengths[0]
-                        infer_text = [
-                            text_inputs[0] + ([" "] if isinstance(text_inputs[0], list) else " ") + text_inputs[0]
-                        ]
-                        with torch.inference_mode():
-                            generated, _ = self.accelerator.unwrap_model(self.model).sample(
-                                cond=mel_spec[0][:ref_audio_len].unsqueeze(0),
-                                text=infer_text,
-                                duration=ref_audio_len * 2,
-                                steps=nfe_step,
-                                cfg_strength=cfg_strength,
-                                sway_sampling_coef=sway_sampling_coef,
+                        global_update += 1
+                        progress_bar.update(1)
+                        progress_bar.set_postfix(update=str(global_update), loss=loss.item())
+
+                    if self.accelerator.is_local_main_process:
+                        self.accelerator.log(
+                            {"loss": loss.item(), "lr": self.scheduler.get_last_lr()[0]}, step=global_update
+                        )
+                        if self.logger == "tensorboard":
+                            self.writer.add_scalar("loss", loss.item(), global_update)
+                            self.writer.add_scalar("lr", self.scheduler.get_last_lr()[0], global_update)
+
+                    if global_update % self.last_per_updates == 0 and self.accelerator.sync_gradients:
+                        self.save_checkpoint(global_update, last=True)
+
+                    if global_update % self.save_per_updates == 0 and self.accelerator.sync_gradients:
+                        self.save_checkpoint(global_update)
+
+                        if self.log_samples and self.accelerator.is_local_main_process:
+                            ref_audio_len = mel_lengths[0]
+                            infer_text = [
+                                text_inputs[0] + ([" "] if isinstance(text_inputs[0], list) else " ") + text_inputs[0]
+                            ]
+                            
+                            # === 修改点 4: 验证生成时的 Emotion ===
+                            # 我们取 batch 里第一条数据的 emotion 作为参考
+                            # 并且注意：这里不需要 squeeze/unsqueeze 太多次，因为 model.sample 内部处理
+                            ref_emotion = emotion[0].unsqueeze(0) # [1]
+                            
+                            with torch.inference_mode():
+                                generated, _ = self.accelerator.unwrap_model(self.model).sample(
+                                    cond=mel_spec[0][:ref_audio_len].unsqueeze(0),
+                                    text=infer_text,
+                                    duration=ref_audio_len * 2,
+                                    steps=nfe_step,
+                                    cfg_strength=cfg_strength,
+                                    sway_sampling_coef=sway_sampling_coef,
+                                    emotion=ref_emotion, # <--- 传入验证的情感
+                                    drop_emotion=False   # <--- 验证时不丢弃
+                                )
+                                generated = generated.to(torch.float32)
+                                gen_mel_spec = generated[:, ref_audio_len:, :].permute(0, 2, 1).to(self.accelerator.device)
+                                ref_mel_spec = batch["mel"][0].unsqueeze(0)
+                                if self.vocoder_name == "vocos":
+                                    gen_audio = vocoder.decode(gen_mel_spec).cpu()
+                                    ref_audio = vocoder.decode(ref_mel_spec).cpu()
+                                elif self.vocoder_name == "bigvgan":
+                                    gen_audio = vocoder(gen_mel_spec).squeeze(0).cpu()
+                                    ref_audio = vocoder(ref_mel_spec).squeeze(0).cpu()
+
+                            torchaudio.save(
+                                f"{log_samples_path}/update_{global_update}_gen.wav", gen_audio, target_sample_rate
                             )
-                            generated = generated.to(torch.float32)
-                            gen_mel_spec = generated[:, ref_audio_len:, :].permute(0, 2, 1).to(self.accelerator.device)
-                            ref_mel_spec = batch["mel"][0].unsqueeze(0)
-                            if self.vocoder_name == "vocos":
-                                gen_audio = vocoder.decode(gen_mel_spec).cpu()
-                                ref_audio = vocoder.decode(ref_mel_spec).cpu()
-                            elif self.vocoder_name == "bigvgan":
-                                gen_audio = vocoder(gen_mel_spec).squeeze(0).cpu()
-                                ref_audio = vocoder(ref_mel_spec).squeeze(0).cpu()
+                            torchaudio.save(
+                                f"{log_samples_path}/update_{global_update}_ref.wav", ref_audio, target_sample_rate
+                            )
+                            self.model.train()
 
-                        torchaudio.save(
-                            f"{log_samples_path}/update_{global_update}_gen.wav", gen_audio, target_sample_rate
-                        )
-                        torchaudio.save(
-                            f"{log_samples_path}/update_{global_update}_ref.wav", ref_audio, target_sample_rate
-                        )
-                        self.model.train()
+            self.save_checkpoint(global_update, last=True)
 
-        self.save_checkpoint(global_update, last=True)
-
-        self.accelerator.end_training()
+            self.accelerator.end_training()

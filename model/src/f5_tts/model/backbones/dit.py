@@ -26,6 +26,36 @@ from f5_tts.model.modules import (
 )
 
 
+# src/f5_tts/model/backbones/dit.py
+
+class EmotionEmbedding(nn.Module):
+    def __init__(self, num_embeds, dim):
+        super().__init__()
+        # +1 用于处理 drop_emotion (CFG) 或者 padding
+        self.embed = nn.Embedding(num_embeds + 1, dim)
+        nn.init.zeros_(self.embed.weight)
+
+    def forward(self, idx, drop_emotion=False):
+        # 1. 先获取原始 embedding [Batch, Dim]
+        embeds = self.embed(idx)
+        
+        # 2. 情况 A：推理时 (Inference)，传入的是普通的 Python bool
+        if isinstance(drop_emotion, bool):
+            if drop_emotion:
+                return torch.zeros_like(embeds)
+            return embeds
+            
+        # 3. 情况 B：训练时 (Training)，传入的是 Tensor [Batch]
+        else:
+            # 确保 drop_emotion 是布尔类型
+            mask = drop_emotion.bool()
+            
+            # 将 mask 维度从 [Batch] 扩展为 [Batch, 1] 以便广播到 [Batch, Dim]
+            mask = mask.unsqueeze(-1)
+            
+            # 使用 torch.where 进行元素级选择
+            # 如果 mask 为 True (要 drop)，则填 0；否则保留原值
+            return torch.where(mask, torch.zeros_like(embeds), embeds)
 # Text embedding
 
 
@@ -165,6 +195,8 @@ class DiT(nn.Module):
         attn_mask_enabled=False,
         long_skip_connection=False,
         checkpoint_activations=False,
+        emotion_num_embeds=6,  # 默认 5 个情感 + 1 个预留
+        **kwargs
     ):
         super().__init__()
 
@@ -180,6 +212,7 @@ class DiT(nn.Module):
         )
         self.text_cond, self.text_uncond = None, None  # text cache
         self.input_embed = InputEmbedding(mel_dim, text_dim, dim)
+        self.emotion_embed = EmotionEmbedding(emotion_num_embeds, dim)
 
         self.rotary_embed = RotaryEmbedding(dim_head)
 
@@ -281,6 +314,8 @@ class DiT(nn.Module):
         cond: float["b n d"],  # masked cond audio
         text: int["b nt"],  # text
         time: float["b"] | float[""],  # time step
+        emotion: int["b"] | None = None, 
+        drop_emotion: bool = False,
         mask: bool["b n"] | None = None,
         drop_audio_cond: bool = False,  # cfg for cond audio
         drop_text: bool = False,  # cfg for text
@@ -293,6 +328,9 @@ class DiT(nn.Module):
 
         # t: conditioning time, text: text, x: noised audio + cond audio + text
         t = self.time_embed(time)
+        # if emotion is not None: print("DiT got emotion!")
+        if emotion is not None:
+            t = t + self.emotion_embed(emotion, drop_emotion=drop_emotion)
         if cfg_infer:  # pack cond & uncond forward: b n d -> 2b n d
             x_cond = self.get_input_embed(
                 x, cond, text, drop_audio_cond=False, drop_text=False, cache=cache, audio_mask=mask
