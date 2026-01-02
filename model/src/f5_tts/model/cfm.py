@@ -43,6 +43,7 @@ class CFM(nn.Module):
         ),
         audio_drop_prob=0.3,
         cond_drop_prob=0.2,
+        emotion_drop_prob=0.15,
         num_channels=None,
         mel_spec_module: nn.Module | None = None,
         mel_spec_kwargs: dict = dict(),
@@ -61,6 +62,7 @@ class CFM(nn.Module):
         # classifier-free guidance
         self.audio_drop_prob = audio_drop_prob
         self.cond_drop_prob = cond_drop_prob
+        self.emotion_drop_prob = emotion_drop_prob
 
         # transformer
         self.transformer = transformer
@@ -99,6 +101,7 @@ class CFM(nn.Module):
         duplicate_test=False,
         t_inter=0.1,
         edit_mask=None,
+        emotion: int["b nt"] | None = None,
         drop_emotion=False,
         **kwargs
     ):
@@ -175,6 +178,8 @@ class CFM(nn.Module):
                     mask=mask,
                     drop_audio_cond=False,
                     drop_text=False,
+                    drop_emotion=drop_emotion,
+                    emotion=emotion,
                     cache=True,
                     **kwargs
                 )
@@ -187,6 +192,7 @@ class CFM(nn.Module):
                 text=text,
                 time=t,
                 mask=mask,
+                emotion=emotion,
                 cfg_infer=True,
                 cache=True,
                 **kwargs
@@ -239,6 +245,7 @@ class CFM(nn.Module):
         *,
         lens: int["b"] | None = None,
         noise_scheduler: str | None = None,
+        emotion: int["b nt"] | None = None,
         **kwargs
     ):
         # handle raw wave
@@ -292,12 +299,20 @@ class CFM(nn.Module):
         if random() < self.cond_drop_prob:  # p_uncond in voicebox paper
             drop_audio_cond = True
             drop_text = True
+            drop_emotion = True
         else:
             drop_text = False
+            drop_emotion = False
+        
+        if random() < self.emotion_drop_prob:
+            drop_emotion = True
 
         # apply mask will use more memory; might adjust batchsize or batchsampler long sequence threshold
+        kwargs.pop("drop_emotion", None)
+        kwargs.pop("drop_text", None)
+        kwargs.pop("drop_audio_cond", None)
         pred = self.transformer(
-            x=φ, cond=cond, text=text, time=time, drop_audio_cond=drop_audio_cond, drop_text=drop_text, mask=mask, **kwargs
+            x=φ, cond=cond, text=text, time=time, emotion=emotion, drop_audio_cond=drop_audio_cond, drop_text=drop_text, drop_emotion=drop_emotion, mask=mask, **kwargs
         )
 
         # flow matching loss

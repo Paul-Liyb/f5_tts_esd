@@ -26,45 +26,18 @@ from f5_tts.model.modules import (
 )
 
 
-# src/f5_tts/model/backbones/dit.py
-
-class EmotionEmbedding(nn.Module):
-    def __init__(self, num_embeds, dim):
-        super().__init__()
-        # +1 用于处理 drop_emotion (CFG) 或者 padding
-        self.embed = nn.Embedding(num_embeds + 1, dim)
-        nn.init.zeros_(self.embed.weight)
-
-    def forward(self, idx, drop_emotion=False):
-        # 1. 先获取原始 embedding [Batch, Dim]
-        embeds = self.embed(idx)
-        
-        # 2. 情况 A：推理时 (Inference)，传入的是普通的 Python bool
-        if isinstance(drop_emotion, bool):
-            if drop_emotion:
-                return torch.zeros_like(embeds)
-            return embeds
-            
-        # 3. 情况 B：训练时 (Training)，传入的是 Tensor [Batch]
-        else:
-            # 确保 drop_emotion 是布尔类型
-            mask = drop_emotion.bool()
-            
-            # 将 mask 维度从 [Batch] 扩展为 [Batch, 1] 以便广播到 [Batch, Dim]
-            mask = mask.unsqueeze(-1)
-            
-            # 使用 torch.where 进行元素级选择
-            # 如果 mask 为 True (要 drop)，则填 0；否则保留原值
-            return torch.where(mask, torch.zeros_like(embeds), embeds)
 # Text embedding
 
 
 class TextEmbedding(nn.Module):
     def __init__(
-        self, text_num_embeds, text_dim, mask_padding=True, average_upsampling=False, conv_layers=0, conv_mult=2
+        self, text_num_embeds, text_dim, emotion_num_embeds=None, mask_padding=True, average_upsampling=False, conv_layers=0, conv_mult=2
     ):
         super().__init__()
         self.text_embed = nn.Embedding(text_num_embeds + 1, text_dim)  # use 0 as filler token
+        if emotion_num_embeds is not None:
+            self.emotion_embed = nn.Embedding(emotion_num_embeds + 1, text_dim)
+            self.null_emotion_id = emotion_num_embeds
 
         self.mask_padding = mask_padding  # mask filler and batch padding tokens or not
         self.average_upsampling = average_upsampling  # zipvoice-style text late average upsampling (after text encoder)
@@ -113,7 +86,7 @@ class TextEmbedding(nn.Module):
 
         return upsampled_text
 
-    def forward(self, text: int["b nt"], seq_len, drop_text=False):
+    def forward(self, text: int["b nt"], seq_len, emotion: int["b nt"] | None = None, drop_text=False, drop_emotion=False):
         text = text + 1  # use 0 as filler token. preprocess of batch pad -1, see list_str_to_idx()
         text = text[:, :seq_len]  # curtail if character tokens are more than the mel spec tokens
         text = F.pad(text, (0, seq_len - text.shape[1]), value=0)  # (opt.) if not self.average_upsampling:
@@ -124,6 +97,15 @@ class TextEmbedding(nn.Module):
             text = torch.zeros_like(text)
 
         text = self.text_embed(text)  # b n -> b n d
+
+        if emotion is not None and hasattr(self, "emotion_embed"):
+            emotion = emotion[:, :seq_len]
+            emotion = F.pad(emotion, (0, seq_len - emotion.shape[1]), value=self.null_emotion_id)
+            
+            if drop_emotion:
+                emotion = torch.full_like(emotion, self.null_emotion_id)
+            
+            text = text + self.emotion_embed(emotion)
 
         # possible extra modeling
         if self.extra_modeling:
@@ -186,6 +168,7 @@ class DiT(nn.Module):
         mel_dim=100,
         text_num_embeds=256,
         text_dim=None,
+        emotion_num_embeds=4,
         text_mask_padding=True,
         text_embedding_average_upsampling=False,
         qk_norm=None,
@@ -195,8 +178,6 @@ class DiT(nn.Module):
         attn_mask_enabled=False,
         long_skip_connection=False,
         checkpoint_activations=False,
-        emotion_num_embeds=6,  # 默认 5 个情感 + 1 个预留
-        **kwargs
     ):
         super().__init__()
 
@@ -206,13 +187,13 @@ class DiT(nn.Module):
         self.text_embed = TextEmbedding(
             text_num_embeds,
             text_dim,
+            emotion_num_embeds=emotion_num_embeds,
             mask_padding=text_mask_padding,
             average_upsampling=text_embedding_average_upsampling,
             conv_layers=conv_layers,
         )
         self.text_cond, self.text_uncond = None, None  # text cache
         self.input_embed = InputEmbedding(mel_dim, text_dim, dim)
-        self.emotion_embed = EmotionEmbedding(emotion_num_embeds, dim)
 
         self.rotary_embed = RotaryEmbedding(dim_head)
 
@@ -269,14 +250,16 @@ class DiT(nn.Module):
         x,  # b n d
         cond,  # b n d
         text,  # b nt
+        emotion=None,
         drop_audio_cond: bool = False,
         drop_text: bool = False,
+        drop_emotion: bool = False,
         cache: bool = True,
         audio_mask: bool["b n"] | None = None,
     ):
         if self.text_uncond is None or self.text_cond is None or not cache:
             if audio_mask is None:
-                text_embed = self.text_embed(text, x.shape[1], drop_text=drop_text)
+                text_embed = self.text_embed(text, x.shape[1], emotion=emotion, drop_text=drop_text, drop_emotion=drop_emotion)
             else:
                 batch = x.shape[0]
                 seq_lens = audio_mask.sum(dim=1)  # Calculate the actual sequence length for each sample
@@ -285,7 +268,9 @@ class DiT(nn.Module):
                     text_embed_i = self.text_embed(
                         text[i].unsqueeze(0),
                         seq_len=seq_lens[i].item(),
+                        emotion=emotion[i].unsqueeze(0) if emotion is not None else None,
                         drop_text=drop_text,
+                        drop_emotion=drop_emotion,
                     )
                     text_embed_list.append(text_embed_i[0])
                 text_embed = pad_sequence(text_embed_list, batch_first=True, padding_value=0)
@@ -314,11 +299,11 @@ class DiT(nn.Module):
         cond: float["b n d"],  # masked cond audio
         text: int["b nt"],  # text
         time: float["b"] | float[""],  # time step
-        emotion: int["b"] | None = None, 
-        drop_emotion: bool = False,
+        emotion: int["b nt"] | None = None,
         mask: bool["b n"] | None = None,
         drop_audio_cond: bool = False,  # cfg for cond audio
         drop_text: bool = False,  # cfg for text
+        drop_emotion: bool = False,  # cfg for emotion
         cfg_infer: bool = False,  # cfg inference, pack cond & uncond forward
         cache: bool = False,
     ):
@@ -328,22 +313,19 @@ class DiT(nn.Module):
 
         # t: conditioning time, text: text, x: noised audio + cond audio + text
         t = self.time_embed(time)
-        # if emotion is not None: print("DiT got emotion!")
-        if emotion is not None:
-            t = t + self.emotion_embed(emotion, drop_emotion=drop_emotion)
         if cfg_infer:  # pack cond & uncond forward: b n d -> 2b n d
             x_cond = self.get_input_embed(
-                x, cond, text, drop_audio_cond=False, drop_text=False, cache=cache, audio_mask=mask
+                x, cond, text, emotion=emotion, drop_audio_cond=False, drop_text=False, drop_emotion=False, cache=cache, audio_mask=mask
             )
             x_uncond = self.get_input_embed(
-                x, cond, text, drop_audio_cond=True, drop_text=True, cache=cache, audio_mask=mask
+                x, cond, text, emotion=emotion, drop_audio_cond=True, drop_text=True, drop_emotion=True, cache=cache, audio_mask=mask
             )
             x = torch.cat((x_cond, x_uncond), dim=0)
             t = torch.cat((t, t), dim=0)
             mask = torch.cat((mask, mask), dim=0) if mask is not None else None
         else:
             x = self.get_input_embed(
-                x, cond, text, drop_audio_cond=drop_audio_cond, drop_text=drop_text, cache=cache, audio_mask=mask
+                x, cond, text, emotion=emotion, drop_audio_cond=drop_audio_cond, drop_text=drop_text, drop_emotion=drop_emotion, cache=cache, audio_mask=mask
             )
 
         rope = self.rotary_embed.forward_from_seq_len(seq_len)

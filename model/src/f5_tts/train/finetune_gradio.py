@@ -345,6 +345,8 @@ def start_training(
     stream,
     logger,
     ch_8bit_adam,
+    dataset_type,
+    local_path,
 ):
     global training_process, tts_api, stop_signal
 
@@ -413,6 +415,7 @@ def start_training(
         f" --keep_last_n_checkpoints {keep_last_n_checkpoints}"
         f" --last_per_updates {last_per_updates}"
         f" --dataset_name {dataset_name}"
+        f" --dataset_type {dataset_type}"
     )
 
     if finetune:
@@ -423,6 +426,9 @@ def start_training(
 
     if tokenizer_file != "":
         cmd += f" --tokenizer_path {tokenizer_file}"
+    
+    if local_path != "":
+        cmd += f" --local_path \"{local_path}\""
 
     cmd += f" --tokenizer {tokenizer_type}"
 
@@ -1536,6 +1542,12 @@ If you encounter a memory error, try reducing the batch size per GPU to a smalle
 ```""")
             with gr.Row():
                 exp_name = gr.Radio(label="Model", choices=["F5TTS_v1_Base", "F5TTS_Base", "E2TTS_Base"])
+                dataset_type = gr.Dropdown(
+                    label="Dataset Type", 
+                    choices=["CustomDataset", "ESDDataset"], 
+                    value="CustomDataset",
+                    info="Select 'ESDDataset' for emotion support"
+                )
                 tokenizer_file = gr.Textbox(label="Tokenizer File")
                 file_checkpoint_train = gr.Textbox(label="Path to the Pretrained Checkpoint")
 
@@ -1580,7 +1592,11 @@ If you encounter a memory error, try reducing the batch size per GPU to a smalle
                     info="Save latest checkpoint with suffix _last.pt every N updates",
                     minimum=10,
                 )
-                gr.Radio(label="")  # placeholder
+                local_path = gr.Textbox(
+                    label="Local Vocoder Path", 
+                    value="", 
+                    info="Path to local vocos checkpoint folder (optional)"
+                )
 
             with gr.Row():
                 ch_8bit_adam = gr.Checkbox(label="Use 8-bit Adam optimizer")
@@ -1634,6 +1650,8 @@ If you encounter a memory error, try reducing the batch size per GPU to a smalle
                 cd_logger.value = logger_value
                 ch_8bit_adam.value = bnb_optimizer_value
 
+
+
             ch_stream = gr.Checkbox(label="Stream Output Experiment", value=True)
             txt_info_train = gr.Textbox(label="Info", value="")
 
@@ -1668,6 +1686,7 @@ If you encounter a memory error, try reducing the batch size per GPU to a smalle
                 inputs=[ch_list_audio],
                 outputs=[audio_ref_stream, audio_gen_stream],
             )
+            stop_button.click(fn=stop_training, outputs=[txt_info_train, start_button, stop_button])
 
             start_button.click(
                 fn=start_training,
@@ -1693,10 +1712,11 @@ If you encounter a memory error, try reducing the batch size per GPU to a smalle
                     ch_stream,
                     cd_logger,
                     ch_8bit_adam,
+                    dataset_type,
+                    local_path,
                 ],
                 outputs=[txt_info_train, start_button, stop_button],
             )
-            stop_button.click(fn=stop_training, outputs=[txt_info_train, start_button, stop_button])
 
             bt_calculate.click(
                 fn=calculate_train,

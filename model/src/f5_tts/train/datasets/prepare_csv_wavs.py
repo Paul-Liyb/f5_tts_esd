@@ -66,14 +66,28 @@ def graceful_exit():
 
 def process_audio_file(audio_path, text, emotion, polyphone):
     """Process a single audio file by checking its existence and extracting duration."""
-    if not Path(audio_path).exists():
+    path_obj = Path(audio_path)
+    if not path_obj.exists():
         print(f"audio {audio_path} not found, skipping")
         return None
     try:
         audio_duration = get_audio_duration(audio_path)
         if audio_duration <= 0:
             raise ValueError(f"Duration {audio_duration} is non-positive.")
-        return (audio_path, text, audio_duration, emotion)
+        
+        # 文件名格式为 0011_000408
+        filename = path_obj.stem  # 获取不带后缀的文件名
+        parts = filename.split('_')
+        if len(parts) >= 2:
+            speaker_id = parts[0]  # 前4位数字，如 "0011"
+            # 取下划线后的数字部分，转换为 int 后取 350 的余数
+            raw_phrase_num = "".join(filter(str.isdigit, parts[1])) # 健壮处理，只留数字
+            phrase_id = int(raw_phrase_num) % 350
+        else:
+            speaker_id = "unknown"
+            phrase_id = 0
+
+        return (audio_path, text, audio_duration, emotion, speaker_id, phrase_id)
     except Exception as e:
         print(f"Warning: Failed to process {audio_path} due to error: {e}. Skipping corrupt file.")
         return None
@@ -133,7 +147,6 @@ def prepare_csv_wavs_dir(input_dir, num_workers=None):
 
             executor = None
 
-    # Filter out failed results
     processed = [res for res in results if res is not None]
     if not processed:
         raise RuntimeError("No valid audio files were processed!")
@@ -147,11 +160,18 @@ def prepare_csv_wavs_dir(input_dir, num_workers=None):
     durations = []
     vocab_set = set()
 
-    for (audio_path, _, duration, emotion), conv_text in zip(processed, converted_texts):
-        sub_result.append({"audio_path": audio_path, "text": conv_text, "duration": duration, "emotion":emotion})
+    for (audio_path, _, duration, emotion, speaker_id, phrase_id), conv_text in zip(processed, converted_texts):
+        sub_result.append({
+            "audio_path": audio_path, 
+            "text": conv_text, 
+            "duration": duration, 
+            "emotion": emotion,
+            "speaker_id": speaker_id,  
+            "phrase_id": phrase_id     
+        })
         durations.append(duration)
         vocab_set.update(list(conv_text))
-
+        
     return sub_result, durations, vocab_set
 
 

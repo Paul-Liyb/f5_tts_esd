@@ -27,10 +27,11 @@ def parse_args():
         "--exp_name",
         type=str,
         default="F5TTS_v1_Base",
-        choices=["F5TTS_v1_Base", "F5TTS_Base", "E2TTS_Base","F5TTS_v1_Base_ESD"],
+        choices=["F5TTS_v1_Base", "F5TTS_Base", "E2TTS_Base"],
         help="Experiment name",
     )
     parser.add_argument("--dataset_name", type=str, default="Emilia_ZH_EN", help="Name of the dataset to use")
+    parser.add_argument("--dataset_type", type=str, default="ESDDataset", help="Type of dataset (CustomDataset/ESDDataset)")
     parser.add_argument("--learning_rate", type=float, default=1e-5, help="Learning rate for training")
     parser.add_argument("--batch_size_per_gpu", type=int, default=3200, help="Batch size per GPU")
     parser.add_argument(
@@ -71,6 +72,7 @@ def parse_args():
         action="store_true",
         help="Use 8-bit Adam optimizer from bitsandbytes",
     )
+    parser.add_argument("--local_path", type=str, default="/home/jovyan/boomcheng-work-shcdt/liyangbo/CODE/test/dit/models/vocos-mel-24khz", help="Path to local vocoder checkpoint (for log_samples)")
 
     return parser.parse_args()
 
@@ -200,9 +202,11 @@ def main():
         log_samples=args.log_samples,
         last_per_updates=args.last_per_updates,
         bnb_optimizer=args.bnb_optimizer,
+        is_local_vocoder=True if args.local_path else False,
+        local_vocoder_path=args.local_path,
     )
 
-    train_dataset = load_dataset(args.dataset_name, tokenizer, mel_spec_kwargs=mel_spec_kwargs)
+    train_dataset = load_dataset(args.dataset_name, tokenizer, dataset_type=args.dataset_type, mel_spec_kwargs=mel_spec_kwargs)
 
     trainer.train(
         train_dataset,

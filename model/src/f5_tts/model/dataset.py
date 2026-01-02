@@ -1,5 +1,6 @@
 import json
 from importlib.resources import files
+import random
 
 import torch
 import torch.nn.functional as F
@@ -12,6 +13,7 @@ from tqdm import tqdm
 
 from f5_tts.model.modules import MelSpec
 from f5_tts.model.utils import default
+import os
 
 
 class HFDataset(Dataset):
@@ -131,10 +133,7 @@ class CustomDataset(Dataset):
             audio_path = row["audio_path"]
             text = row["text"]
             duration = row["duration"]
-            raw_emotion = row["emotion"] 
-            emo_map = {"Angry": 0, "Happy": 1, "Neutral": 2, "Sad":3, "Surprise":4}
-            # emo_map = {"Angry": 0, "Happy": 1, "Neutral": 2, "Sad":3, "Surprise":4}
-            emotion = emo_map.get(raw_emotion, 2) # 默认为2
+
             # filter by given length
             if 0.3 <= duration <= 30:
                 break  # valid
@@ -162,8 +161,181 @@ class CustomDataset(Dataset):
         return {
             "mel_spec": mel_spec,
             "text": text,
-            "emotion":emotion,
         }
+
+
+
+class ESDDataset(Dataset):
+    def __init__(
+        self,
+        custom_dataset: Dataset,
+        durations=None,
+        target_sample_rate=24_000,
+        hop_length=256,
+        n_mel_channels=100,
+        n_fft=1024,
+        win_length=1024,
+        mel_spec_type="vocos",
+        preprocessed_mel=False,
+        mel_spec_module: nn.Module | None = None,
+    ):
+        self.emo_map = {"Angry": 0, "Happy": 1, "Neutral": 2, "Sad":3, "Surprise":4}
+        self.data = custom_dataset
+        self.durations = durations
+        self.target_sample_rate = target_sample_rate
+        self.hop_length = hop_length
+        self.n_fft = n_fft
+        self.win_length = win_length
+        self.mel_spec_type = mel_spec_type
+        self.preprocessed_mel = preprocessed_mel
+        self.data_mapping = self.index_data()
+
+        if not preprocessed_mel:
+            self.mel_spectrogram = default(
+                mel_spec_module,
+                MelSpec(
+                    n_fft=n_fft,
+                    hop_length=hop_length,
+                    win_length=win_length,
+                    n_mel_channels=n_mel_channels,
+                    target_sample_rate=target_sample_rate,
+                    mel_spec_type=mel_spec_type,
+                ),
+            )
+
+    def index_data(self):
+        nested_dict = {}
+
+        for index in range(len(self.data)):
+            row = self.data[index]
+            speaker_id = row["speaker_id"]
+            emotion  = row["emotion"]
+            phrase_id  = row["phrase_id"]
+
+            if speaker_id not in nested_dict:
+                nested_dict[speaker_id] = {}
+            if emotion not in nested_dict[speaker_id]:
+                nested_dict[speaker_id][emotion] = {}
+            if phrase_id not in nested_dict[speaker_id][emotion]:
+                nested_dict[speaker_id][emotion][phrase_id] = []
+
+            nested_dict[speaker_id][emotion][phrase_id].append(index)
+
+        return nested_dict
+
+    def get_frame_len(self, index):
+        if (
+            self.durations is not None
+        ):  # Please make sure the separately provided durations are correct, otherwise 99.99% OOM
+            return self.durations[index] * self.target_sample_rate / self.hop_length
+        return self.data[index]["duration"] * self.target_sample_rate / self.hop_length
+
+    def __len__(self):
+        return len(self.data)
+
+    def sample_emotion(self, nested_dict, speaker_id):
+        emotions = list(nested_dict[speaker_id].keys())
+        return random.choice(emotions)
+
+    def sample_phrase(self, nested_dict, speaker_id, emotion):
+        phrase_ids = list(nested_dict[speaker_id][emotion].keys())
+        return random.choice(phrase_ids)
+
+    def __getitem__(self, index):
+        '''
+        sample first audio
+        '''
+        while True:
+            row = self.data[index]
+            audio_path = row["audio_path"]
+            text = row["text"]
+            duration = row["duration"]
+            
+            #  emo
+            speaker_id = row["speaker_id"]
+            emotion = row["emotion"]
+            emotion = self.emo_map.get(emotion, 2)
+            emotion_tensor = torch.full((len(text),), fill_value=emotion, dtype=torch.long)
+
+            # filter by given length
+            if 0.3 <= duration <= 30:
+                break  # valid
+
+            index = (index + 1) % len(self.data)
+
+        if self.preprocessed_mel:
+            mel_spec = torch.tensor(row["mel_spec"])
+        else:
+            audio, source_sample_rate = torchaudio.load(audio_path)
+
+            # make sure mono input
+            if audio.shape[0] > 1:
+                audio = torch.mean(audio, dim=0, keepdim=True)
+
+            # resample if necessary
+            if source_sample_rate != self.target_sample_rate:
+                resampler = torchaudio.transforms.Resample(source_sample_rate, self.target_sample_rate)
+                audio = resampler(audio)
+
+            # to mel spectrogram
+            mel_spec = self.mel_spectrogram(audio)
+            mel_spec = mel_spec.squeeze(0)  # '1 d t -> d t'
+
+
+        '''
+        sample second audio
+        same speaker_id, random emotion, random phrase_id
+        '''
+
+        while True:
+            #  get index of second segment
+            emotion_2 = self.sample_emotion(self.data_mapping, speaker_id)
+            phrase_id_2 = self.sample_phrase(self.data_mapping, speaker_id, emotion_2)
+            index_2 = self.data_mapping[speaker_id][emotion_2][phrase_id_2][0]
+
+
+            row_2 = self.data[index]
+            audio_path_2 = row_2["audio_path"]
+            text_2 = row_2["text"]
+            duration_2 = row_2["duration"]
+            
+            #  emo
+            emotion_2 = row["emotion"]
+            emotion_2 = self.emo_map.get(emotion_2, 2)
+            emotion_tensor_2 = torch.full((len(text_2),), fill_value=emotion_2, dtype=torch.long)
+
+
+            # filter by given length
+            if 0.3 <= duration <= 30:
+                break  # valid
+
+
+        if self.preprocessed_mel:
+            mel_spec_2 = torch.tensor(row_2["mel_spec"])
+        else:
+            audio_2, source_sample_rate = torchaudio.load(audio_path_2)
+
+            # make sure mono input
+            if audio_2.shape[0] > 1:
+                audio_2 = torch.mean(audio_2, dim=0, keepdim=True)
+
+            # resample if necessary
+            if source_sample_rate != self.target_sample_rate:
+                resampler = torchaudio.transforms.Resample(source_sample_rate, self.target_sample_rate)
+                audio_2 = resampler(audio_2)
+
+            # to mel spectrogram
+            mel_spec_2 = self.mel_spectrogram(audio_2)
+            mel_spec_2 = mel_spec_2.squeeze(0)  # '1 d t -> d t'
+
+        return {
+            "mel_spec": torch.cat([mel_spec, mel_spec_2], dim=1),
+            "text": text + text_2,
+            "emotion": torch.cat([emotion_tensor, emotion_tensor_2], dim=0)
+        }
+
+        
+
 
 
 # Dynamic Batch Sampler
@@ -241,8 +413,8 @@ class DynamicBatchSampler(Sampler[list[int]]):
         return len(self.batches)
 
 
-# Load dataset
 
+# Load dataset
 
 def load_dataset(
     dataset_name: str,
@@ -260,7 +432,11 @@ def load_dataset(
     print("Loading dataset ...")
 
     if dataset_type == "CustomDataset":
-        rel_data_path = str(files("f5_tts").joinpath(f"../../data/{dataset_name}_{tokenizer}"))
+        base_path = files("f5_tts").joinpath("../../data")
+        rel_data_path = str(base_path.joinpath(f"{dataset_name}_{tokenizer}"))
+        if not os.path.exists(rel_data_path):
+            rel_data_path = str(base_path.joinpath(f"{dataset_name}"))
+
         if audio_type == "raw":
             try:
                 train_dataset = load_from_disk(f"{rel_data_path}/raw")
@@ -304,6 +480,32 @@ def load_dataset(
             load_dataset(f"{pre}/{pre}", split=f"train.{post}", cache_dir=str(files("f5_tts").joinpath("../../data"))),
         )
 
+    elif dataset_type == "ESDDataset":
+        base_path = files("f5_tts").joinpath("../../data")
+        rel_data_path = str(base_path.joinpath(f"{dataset_name}_{tokenizer}"))
+        if not os.path.exists(rel_data_path):
+            rel_data_path = str(base_path.joinpath(f"{dataset_name}"))
+            
+        if audio_type == "raw":
+            try:
+                train_dataset = load_from_disk(f"{rel_data_path}/raw")
+            except:  # noqa: E722
+                train_dataset = Dataset_.from_file(f"{rel_data_path}/raw.arrow")
+            preprocessed_mel = False
+        elif audio_type == "mel":
+            train_dataset = Dataset_.from_file(f"{rel_data_path}/mel.arrow")
+            preprocessed_mel = True
+        with open(f"{rel_data_path}/duration.json", "r", encoding="utf-8") as f:
+            data_dict = json.load(f)
+        durations = data_dict["duration"]
+        train_dataset = ESDDataset(
+            train_dataset,
+            durations=durations,
+            preprocessed_mel=preprocessed_mel,
+            mel_spec_module=mel_spec_module,
+            **mel_spec_kwargs,
+        )
+
     return train_dataset
 
 
@@ -324,14 +526,14 @@ def collate_fn(batch):
     mel_specs = torch.stack(padded_mel_specs)
 
     text = [item["text"] for item in batch]
+    emotions = [item["emotion"] for item in batch]
     text_lengths = torch.LongTensor([len(item) for item in text])
-    emotions = [item["emotion"] for item in batch] 
-    emotion_tensor = torch.LongTensor(emotions)
     
+
     return dict(
         mel=mel_specs,
         mel_lengths=mel_lengths,  # records for padding mask
         text=text,
         text_lengths=text_lengths,
-        emotion=emotion_tensor,
+        emotion=emotions,
     )
