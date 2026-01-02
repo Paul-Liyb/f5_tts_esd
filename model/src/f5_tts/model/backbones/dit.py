@@ -37,6 +37,7 @@ class TextEmbedding(nn.Module):
         self.text_embed = nn.Embedding(text_num_embeds + 1, text_dim)  # use 0 as filler token
         if emotion_num_embeds is not None:
             self.emotion_embed = nn.Embedding(emotion_num_embeds + 1, text_dim)
+            nn.init.zeros_(self.emotion_embed.weight)
             self.null_emotion_id = emotion_num_embeds
 
         self.mask_padding = mask_padding  # mask filler and batch padding tokens or not
