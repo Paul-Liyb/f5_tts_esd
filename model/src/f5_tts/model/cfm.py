@@ -330,4 +330,18 @@ class CFM(nn.Module):
         loss = F.mse_loss(pred, flow, reduction="none")
         loss = loss[rand_span_mask]
 
-        return loss.mean(), cond, pred
+        pred_2 = self.transformer(
+            x=φ, cond=cond, text=text, time=time, emotion=emotion, drop_audio_cond=drop_audio_cond, drop_text=drop_text, drop_emotion=True, mask=mask, **kwargs
+        )
+
+        pred_2 = pred_2.detach()
+        loss_2 = F.mse_loss(pred_2, flow, reduction="none")
+        loss_2 = loss_2[rand_span_mask]
+
+        
+        loss_3 = F.mse_loss(pred, pred_2, reduction="none")
+        loss_3 = loss_3[rand_span_mask]
+
+        loss_total = loss.mean() + loss_2.mean() - loss_3.mean()
+
+        return loss_total, cond, pred
