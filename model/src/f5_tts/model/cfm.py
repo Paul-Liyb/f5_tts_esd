@@ -212,7 +212,7 @@ class CFM(nn.Module):
                 **kwargs
             )
             pred, null_pred = torch.chunk(pred_cfg, 2, dim=0)
-            return pred + (pred - null_pred) * cfg_strength + (pred_cfg - null_pred)  * 10
+            return pred + (pred - null_pred) * cfg_strength + (pred - pred_cfg2)  * 10
 
         # noise input
         # to make sure batch inference result is same with different batch size, and for sure single inference
