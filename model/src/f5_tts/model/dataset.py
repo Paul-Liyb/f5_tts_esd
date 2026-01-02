@@ -235,18 +235,21 @@ class ESDDataset(Dataset):
 
     def sample_emotion(self, nested_dict, speaker_id):
         emotions = list(nested_dict[speaker_id].keys())
-        return random.choice(emotions)
+        idx = torch.randint(0, len(emotions), (1,)).item()
+        return emotions[idx]
 
     def sample_phrase(self, nested_dict, speaker_id, emotion):
         phrase_ids = list(nested_dict[speaker_id][emotion].keys())
-        return random.choice(phrase_ids)
+        idx = torch.randint(0, len(phrase_ids), (1,)).item()
+        return phrase_ids[idx]
 
     def __getitem__(self, index):
         '''
         sample first audio
         '''
+        current_index = index
         while True:
-            row = self.data[index]
+            row = self.data[current_index]
             audio_path = row["audio_path"]
             text = row["text"]
             duration = row["duration"]
@@ -261,7 +264,7 @@ class ESDDataset(Dataset):
             if 0.3 <= duration <= 30:
                 break  # valid
 
-            index = (index + 1) % len(self.data)
+            current_index = (current_index + 1) % len(self.data)
 
         if self.preprocessed_mel:
             mel_spec = torch.tensor(row["mel_spec"])
@@ -293,6 +296,9 @@ class ESDDataset(Dataset):
             phrase_id_2 = self.sample_phrase(self.data_mapping, speaker_id, emotion_2)
             index_2 = self.data_mapping[speaker_id][emotion_2][phrase_id_2][0]
 
+            # Avoid duplication if possible (unless dataset is tiny)
+            if index_2 == current_index and len(self.data) > 1:
+                continue
 
             row_2 = self.data[index_2]
             audio_path_2 = row_2["audio_path"]
