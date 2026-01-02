@@ -294,19 +294,19 @@ class ESDDataset(Dataset):
             index_2 = self.data_mapping[speaker_id][emotion_2][phrase_id_2][0]
 
 
-            row_2 = self.data[index]
+            row_2 = self.data[index_2]
             audio_path_2 = row_2["audio_path"]
             text_2 = row_2["text"]
             duration_2 = row_2["duration"]
             
             #  emo
-            emotion_2 = row["emotion"]
+            emotion_2 = row_2["emotion"]
             emotion_2 = self.emo_map.get(emotion_2, 2)
             emotion_tensor_2 = torch.full((len(text_2),), fill_value=emotion_2, dtype=torch.long)
 
 
             # filter by given length
-            if 0.3 <= duration <= 30:
+            if 0.3 <= duration_2 <= 30:
                 break  # valid
 
 
