@@ -17,7 +17,7 @@ from tqdm import tqdm
 
 from f5_tts.model import CFM
 from f5_tts.model.dataset import DynamicBatchSampler, collate_fn
-from f5_tts.model.utils import default, exists
+from f5_tts.model.utils import default, exists, list_str_to_idx, list_str_to_tensor
 
 
 # trainer
@@ -427,22 +427,45 @@ class Trainer:
                             text_inputs[0] + ([" "] if isinstance(text_inputs[0], list) else " ") + text_inputs[0]
                         ]
                         with torch.inference_mode():
-                            generated, _ = self.accelerator.unwrap_model(self.model).sample(
-                                cond=mel_spec[0][:ref_audio_len].unsqueeze(0),
-                                text=infer_text,
-                                duration=ref_audio_len * 2,
-                                steps=nfe_step,
-                                cfg_strength=cfg_strength,
-                                sway_sampling_coef=sway_sampling_coef,
-                            )
-                            generated = generated.to(torch.float32)
-                            gen_mel_spec = generated[:, ref_audio_len:, :].permute(0, 2, 1).to(self.accelerator.device)
+                            model_unwrapped = self.accelerator.unwrap_model(self.model)
+                            # Tokenize text once to get length for emotion tensor
+                            if exists(model_unwrapped.vocab_char_map):
+                                text_ids = list_str_to_idx(infer_text, model_unwrapped.vocab_char_map).to(self.accelerator.device)
+                            else:
+                                text_ids = list_str_to_tensor(infer_text).to(self.accelerator.device)
+                            
+                            nt = text_ids.shape[1]
+                            emo_map = {"Angry": 0, "Happy": 1, "Neutral": 2, "Sad": 3, "Surprise": 4}
+                            
+                            for emo_name, emo_id in emo_map.items():
+                                emotion_tensor = torch.full((1, nt), fill_value=emo_id, device=self.accelerator.device, dtype=torch.long)
+                                
+                                generated, _ = model_unwrapped.sample(
+                                    cond=mel_spec[0][:ref_audio_len].unsqueeze(0),
+                                    text=infer_text,
+                                    duration=ref_audio_len * 2,
+                                    steps=nfe_step,
+                                    cfg_strength=cfg_strength,
+                                    sway_sampling_coef=sway_sampling_coef,
+                                    emotion=emotion_tensor,
+                                    drop_emotion=False
+                                )
+                                generated = generated.to(torch.float32)
+                                gen_mel_spec = generated[:, ref_audio_len:, :].permute(0, 2, 1).to(self.accelerator.device)
+                                
+                                if self.vocoder_name == "vocos":
+                                    gen_audio = vocoder.decode(gen_mel_spec).cpu()
+                                elif self.vocoder_name == "bigvgan":
+                                    gen_audio = vocoder(gen_mel_spec).squeeze(0).cpu()
+
+                                torchaudio.save(
+                                    f"{log_samples_path}/update_{global_update}_gen_{emo_name}.wav", gen_audio, target_sample_rate
+                                )
+
                             ref_mel_spec = batch["mel"][0].unsqueeze(0)
                             if self.vocoder_name == "vocos":
-                                gen_audio = vocoder.decode(gen_mel_spec).cpu()
                                 ref_audio = vocoder.decode(ref_mel_spec).cpu()
                             elif self.vocoder_name == "bigvgan":
-                                gen_audio = vocoder(gen_mel_spec).squeeze(0).cpu()
                                 ref_audio = vocoder(ref_mel_spec).squeeze(0).cpu()
 
                         torchaudio.save(
