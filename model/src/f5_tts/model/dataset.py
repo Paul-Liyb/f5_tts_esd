@@ -337,7 +337,9 @@ class ESDDataset(Dataset):
         return {
             "mel_spec": torch.cat([mel_spec, mel_spec_2], dim=1),
             "text": text + text_2,
-            "emotion": torch.cat([emotion_tensor, emotion_tensor_2], dim=0)
+            "emotion": torch.cat([emotion_tensor, emotion_tensor_2], dim=0),
+            "mel_len_1": mel_spec.shape[-1],
+            "text_len_1": len(text),
         }
 
         
@@ -536,10 +538,16 @@ def collate_fn(batch):
     text_lengths = torch.LongTensor([len(item) for item in text])
     
 
+    mel_len_1 = torch.LongTensor([item["mel_len_1"] for item in batch])
+    text_len_1 = torch.LongTensor([item["text_len_1"] for item in batch])
+
     return dict(
         mel=mel_specs,
         mel_lengths=mel_lengths,  # records for padding mask
         text=text,
         text_lengths=text_lengths,
+        text_lengths=text_lengths,
         emotion=emotions,
+        mel_len_1=mel_len_1,
+        text_len_1=text_len_1,
     )

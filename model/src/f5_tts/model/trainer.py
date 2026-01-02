@@ -376,11 +376,15 @@ class Trainer:
                 initial=progress_bar_initial,
             )
 
-            for batch in current_dataloader:
+            for batch_idx, batch in enumerate(current_dataloader):
                 with self.accelerator.accumulate(self.model):
                     text_inputs = batch["text"]
                     mel_spec = batch["mel"].permute(0, 2, 1)
                     mel_lengths = batch["mel_lengths"]
+                    emotion = batch.get("emotion")
+                    # DEBUG
+                    if batch_idx == 1:
+                        print(batch)
 
                     # TODO. add duration predictor training
                     if self.duration_predictor is not None and self.accelerator.is_local_main_process:
@@ -388,7 +392,7 @@ class Trainer:
                         self.accelerator.log({"duration loss": dur_loss.item()}, step=global_update)
 
                     loss, cond, pred = self.model(
-                        mel_spec, text=text_inputs, lens=mel_lengths, noise_scheduler=self.noise_scheduler, emotion=batch.get("emotion")
+                        mel_spec, text=text_inputs, lens=mel_lengths, noise_scheduler=self.noise_scheduler, emotion=emotion
                     )
                     self.accelerator.backward(loss)
 
@@ -422,10 +426,28 @@ class Trainer:
                     self.save_checkpoint(global_update)
 
                     if self.log_samples and self.accelerator.is_local_main_process:
-                        ref_audio_len = mel_lengths[0]
-                        infer_text = [
-                            text_inputs[0] + ([" "] if isinstance(text_inputs[0], list) else " ") + text_inputs[0]
-                        ]
+                        # Use split lengths from dataset to infer only the first sentence
+                        ref_audio_len = batch["mel_len_1"][0]
+                        text_len_1 = batch["text_len_1"][0]
+                        
+                        # Get text for first sentence only
+                        full_text_input = text_inputs[0] 
+                        if isinstance(full_text_input, list):
+                            infer_text_content = full_text_input[:text_len_1]
+                        elif isinstance(full_text_input, torch.Tensor):
+                            infer_text_content = full_text_input[:text_len_1].tolist()
+                        else: 
+                            infer_text_content = str(full_text_input)[:text_len_1]
+
+                        infer_text = [infer_text_content]
+
+                        # Get true emotion of the first sentence for reference filename
+                        # ESDDataset: emotion tensor is [emo_id, ..., emo_id, ...]
+                        true_emo_id = int(batch["emotion"][0][0].item())
+                        emo_map = {"Angry": 0, "Happy": 1, "Neutral": 2, "Sad": 3, "Surprise": 4}
+                        # Reverse map
+                        id_to_emo = {v: k for k, v in emo_map.items()}
+                        true_emo_name = id_to_emo.get(true_emo_id, "Unknown")
                         with torch.inference_mode():
                             model_unwrapped = self.accelerator.unwrap_model(self.model)
                             # Tokenize text once to get length for emotion tensor
@@ -462,18 +484,16 @@ class Trainer:
                                     f"{log_samples_path}/update_{global_update}_gen_{emo_name}.wav", gen_audio, target_sample_rate
                                 )
 
-                            ref_mel_spec = batch["mel"][0].unsqueeze(0)
+                            # Save reference audio (only first part)
+                            ref_mel_spec = batch["mel"][0][:ref_audio_len].unsqueeze(0)
                             if self.vocoder_name == "vocos":
                                 ref_audio = vocoder.decode(ref_mel_spec).cpu()
                             elif self.vocoder_name == "bigvgan":
                                 ref_audio = vocoder(ref_mel_spec).squeeze(0).cpu()
 
-                        torchaudio.save(
-                            f"{log_samples_path}/update_{global_update}_gen.wav", gen_audio, target_sample_rate
-                        )
-                        torchaudio.save(
-                            f"{log_samples_path}/update_{global_update}_ref.wav", ref_audio, target_sample_rate
-                        )
+                            torchaudio.save(
+                                f"{log_samples_path}/update_{global_update}_ref_{true_emo_name}.wav", ref_audio, target_sample_rate
+                            )
                         self.model.train()
 
         self.save_checkpoint(global_update, last=True)
