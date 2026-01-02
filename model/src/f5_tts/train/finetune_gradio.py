@@ -127,7 +127,7 @@ def load_settings(project_name):
         "max_grad_norm": 1.0,
         "epochs": 100,
         "num_warmup_updates": 100,
-        "save_per_updates": 500,
+        "save_per_updates": 100,
         "keep_last_n_checkpoints": -1,
         "last_per_updates": 100,
         "finetune": True,

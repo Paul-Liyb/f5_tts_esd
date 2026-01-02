@@ -546,7 +546,6 @@ def collate_fn(batch):
         mel_lengths=mel_lengths,  # records for padding mask
         text=text,
         text_lengths=text_lengths,
-        text_lengths=text_lengths,
         emotion=emotions,
         mel_len_1=mel_len_1,
         text_len_1=text_len_1,

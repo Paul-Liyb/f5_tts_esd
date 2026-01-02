@@ -3,6 +3,7 @@ from __future__ import annotations
 import gc
 import math
 import os
+import itertools
 
 import torch
 import torchaudio
@@ -329,13 +330,21 @@ class Trainer:
 
         #  accelerator.prepare() dispatches batches to devices;
         #  which means the length of dataloader calculated before, should consider the number of devices
-        warmup_updates = (
-            self.num_warmup_updates * self.accelerator.num_processes
-        )  # consider a fixed warmup steps while using accelerate multi-gpu ddp
-        # otherwise by default with split_batches=False, warmup steps change with num_processes
+        num_processes = self.accelerator.num_processes
+        warmup_updates = self.num_warmup_updates * num_processes
+        
+        print(f"[DEBUG] num_processes: {num_processes}, warmup_updates: {warmup_updates}")
+
         total_updates = math.ceil(len(train_dataloader) / self.grad_accumulation_steps) * self.epochs
         decay_updates = total_updates - warmup_updates
-        warmup_scheduler = LinearLR(self.optimizer, start_factor=1e-8, end_factor=1.0, total_iters=warmup_updates)
+        
+        # If warmup is 0, start factor must be 1.0 to avoid stuck at 1e-8
+        warmup_start_factor = 1e-8 if warmup_updates > 0 else 1.0
+        
+        # Handle total_iters=0 case for LinearLR
+        run_warmup_iters = warmup_updates if warmup_updates > 0 else 1
+
+        warmup_scheduler = LinearLR(self.optimizer, start_factor=warmup_start_factor, end_factor=1.0, total_iters=run_warmup_iters)
         decay_scheduler = LinearLR(self.optimizer, start_factor=1.0, end_factor=1e-8, total_iters=decay_updates)
         self.scheduler = SequentialLR(
             self.optimizer, schedulers=[warmup_scheduler, decay_scheduler], milestones=[warmup_updates]
@@ -383,8 +392,8 @@ class Trainer:
                     mel_lengths = batch["mel_lengths"]
                     emotion = batch.get("emotion")
                     # DEBUG
-                    if batch_idx == 1:
-                        print(batch)
+                    # if batch_idx == 1:
+                    #     print(batch)
 
                     # TODO. add duration predictor training
                     if self.duration_predictor is not None and self.accelerator.is_local_main_process:
@@ -426,37 +435,39 @@ class Trainer:
                     self.save_checkpoint(global_update)
 
                     if self.log_samples and self.accelerator.is_local_main_process:
-                        # Use split lengths from dataset to infer only the first sentence
-                        ref_audio_len = batch["mel_len_1"][0]
-                        text_len_1 = batch["text_len_1"][0]
+                        # Use split lengths from dataset 
+                        ref_audio_len = int(batch["mel_len_1"][0].item())
+                        text_len_1 = int(batch["text_len_1"][0].item())
+                        # We use the first sentence (A1) as Prompt, and generate the rest (T2)
+                        # So we need Full Text input (T1 + T2)
+                        # infer_text should be the full string/list
                         
-                        # Get text for first sentence only
-                        full_text_input = text_inputs[0] 
-                        if isinstance(full_text_input, list):
-                            infer_text_content = full_text_input[:text_len_1]
-                        elif isinstance(full_text_input, torch.Tensor):
-                            infer_text_content = full_text_input[:text_len_1].tolist()
-                        else: 
-                            infer_text_content = str(full_text_input)[:text_len_1]
-
-                        infer_text = [infer_text_content]
+                        full_text_input = text_inputs[0]
+                        infer_text = [full_text_input]
+                        raw_text = "".join(itertools.chain(*infer_text))
+                        print(f"raw_text: {raw_text}")
+                        # Ground truth total length (A1 + A2)
+                        gt_total_len = int(batch["mel_lengths"][0].item())
 
                         # Get true emotion of the first sentence for reference filename
-                        # ESDDataset: emotion tensor is [emo_id, ..., emo_id, ...]
                         true_emo_id = int(batch["emotion"][0][0].item())
                         emo_map = {"Angry": 0, "Happy": 1, "Neutral": 2, "Sad": 3, "Surprise": 4}
-                        # Reverse map
                         id_to_emo = {v: k for k, v in emo_map.items()}
                         true_emo_name = id_to_emo.get(true_emo_id, "Unknown")
+                        
                         with torch.inference_mode():
                             model_unwrapped = self.accelerator.unwrap_model(self.model)
-                            # Tokenize text once to get length for emotion tensor
                             if exists(model_unwrapped.vocab_char_map):
                                 text_ids = list_str_to_idx(infer_text, model_unwrapped.vocab_char_map).to(self.accelerator.device)
                             else:
                                 text_ids = list_str_to_tensor(infer_text).to(self.accelerator.device)
                             
                             nt = text_ids.shape[1]
+                            
+                            # Duration: Use Ground Truth total length as a strong hint, plus a small margin
+                            # Since we are reconstructing T2 from T1, T2 should match A2 length roughly.
+                            duration = int(gt_total_len)
+                            
                             emo_map = {"Angry": 0, "Happy": 1, "Neutral": 2, "Sad": 3, "Surprise": 4}
                             
                             for emo_name, emo_id in emo_map.items():
@@ -465,7 +476,7 @@ class Trainer:
                                 generated, _ = model_unwrapped.sample(
                                     cond=mel_spec[0][:ref_audio_len].unsqueeze(0),
                                     text=infer_text,
-                                    duration=ref_audio_len * 2,
+                                    duration=duration,
                                     steps=nfe_step,
                                     cfg_strength=cfg_strength,
                                     sway_sampling_coef=sway_sampling_coef,
@@ -484,18 +495,31 @@ class Trainer:
                                     f"{log_samples_path}/update_{global_update}_gen_{emo_name}.wav", gen_audio, target_sample_rate
                                 )
 
-                            # Save reference audio (only first part)
-                            ref_mel_spec = batch["mel"][0][:ref_audio_len].unsqueeze(0)
+                            # Save reference audio (Target Part - A2)
+                            # Logic: ref_audio_len is A1 length. gt_total_len is A1+A2 length. 
+                            # We slice from ref_audio_len to gt_total_len to get strict A2 GT.
+                            # mel_spec is [MelDim, Time], sample time dim is 1
+                            ref_mel_spec = batch["mel"][0][:, ref_audio_len:gt_total_len].unsqueeze(0)
                             if self.vocoder_name == "vocos":
                                 ref_audio = vocoder.decode(ref_mel_spec).cpu()
                             elif self.vocoder_name == "bigvgan":
                                 ref_audio = vocoder(ref_mel_spec).squeeze(0).cpu()
 
+                            # Get true emotion of the TARGET sentence (T2)
+                            # emotion concatenation is [T1_emo * len1, T2_emo * len2]
+                            # So we look at index `text_len_1`
+                            true_emo_2_id = int(batch["emotion"][0][text_len_1].item())
+                            true_emo_2_name = id_to_emo.get(true_emo_2_id, "Unknown")
+
                             torchaudio.save(
-                                f"{log_samples_path}/update_{global_update}_ref_{true_emo_name}.wav", ref_audio, target_sample_rate
+                                f"{log_samples_path}/update_{global_update}_ref_target_{true_emo_2_name}.wav", ref_audio, target_sample_rate
                             )
                         self.model.train()
 
         self.save_checkpoint(global_update, last=True)
 
         self.accelerator.end_training()
+
+
+
+# accelerate launch --mixed_precision=fp16 "/home/jovyan/boomcheng-work-shcdt/liyangbo/CODE/test/dit/src/f5_tts/train/finetune_cli.py" --exp_name F5TTS_v1_Base --learning_rate 1e-05 --batch_size_per_gpu 1000 --batch_size_type frame --max_samples 64 --grad_accumulation_steps 1 --max_grad_norm 1 --epochs 80691 --num_warmup_updates 100 --save_per_updates 100 --keep_last_n_checkpoints -1 --last_per_updates 100 --dataset_name ESD_EN_CUSTOM --dataset_type ESDDataset --finetune --pretrain "/home/jovyan/boomcheng-work-shcdt/liyangbo/CODE/test/dit/src/f5_tts/model/utils.py" --tokenizer_path /home/jovyan/boomcheng-work-shcdt/liyangbo/CODE/test/dit/data/ESD_EN_CUSTOM/vocab.txt --tokenizer pinyin --logger wandb --log_samples

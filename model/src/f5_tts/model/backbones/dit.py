@@ -169,7 +169,7 @@ class DiT(nn.Module):
         mel_dim=100,
         text_num_embeds=256,
         text_dim=None,
-        emotion_num_embeds=4,
+        emotion_num_embeds=5,
         text_mask_padding=True,
         text_embedding_average_upsampling=False,
         qk_norm=None,
