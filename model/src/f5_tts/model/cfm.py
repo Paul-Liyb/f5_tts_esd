@@ -197,8 +197,22 @@ class CFM(nn.Module):
                 cache=True,
                 **kwargs
             )
+
+            pred_cfg2 = self.transformer(
+                x=x,
+                cond=step_cond,
+                text=text,
+                time=t,
+                mask=mask,
+                drop_audio_cond=False,
+                drop_text=False,
+                drop_emotion=True,
+                emotion=emotion,
+                cache=True,
+                **kwargs
+            )
             pred, null_pred = torch.chunk(pred_cfg, 2, dim=0)
-            return pred + (pred - null_pred) * cfg_strength
+            return pred + (pred - null_pred) * cfg_strength + (pred_cfg - null_pred)  * 10
 
         # noise input
         # to make sure batch inference result is same with different batch size, and for sure single inference
