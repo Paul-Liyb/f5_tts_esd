@@ -306,7 +306,7 @@ class CFM(nn.Module):
         flow = x1 - x0
 
         # only predict what is within the random mask span for infilling
-        cond = torch.where(rand_span_mask[..., None], torch.zeros_like(x1), x1)
+        cond = torch.where(mask, x1, torch.zeros_like(x1))
 
         # transformer and cfg training with a drop rate
         drop_audio_cond = random() < self.audio_drop_prob  # p_drop in voicebox paper
@@ -328,20 +328,20 @@ class CFM(nn.Module):
 
         # flow matching loss
         loss = F.mse_loss(pred, flow, reduction="none")
-        loss = loss[rand_span_mask]
+        loss = loss[mask]
 
-        with torch.no_grad():
-            pred_2 = self.transformer(
-                x=φ, cond=cond, text=text, time=time, emotion=emotion, drop_audio_cond=drop_audio_cond, drop_text=drop_text, drop_emotion=True, mask=mask, **kwargs
-            )
+        #  with torch.no_grad():
+        #      pred_2 = self.transformer(
+        #          x=φ, cond=cond, text=text, time=time, emotion=emotion, drop_audio_cond=drop_audio_cond, drop_text=drop_text, drop_emotion=True, mask=mask, **kwargs
+        #      )
 
-        loss_2 = F.mse_loss(pred_2, flow, reduction="none")
-        loss_2 = loss_2[rand_span_mask]
+        #  loss_2 = F.mse_loss(pred_2, flow, reduction="none")
+        #  loss_2 = loss_2[mask]
 
         
-        loss_3 = F.mse_loss(pred, pred_2, reduction="none")
-        loss_3 = loss_3[rand_span_mask]
+        #  loss_3 = F.mse_loss(pred, pred_2, reduction="none")
+        #  loss_3 = loss_3[mask]
 
-        loss_total = loss.mean() + loss_2.mean() - loss_3.mean()
+        #  loss_total = loss.mean() + loss_2.mean() - loss_3.mean()
 
-        return loss_total, cond, pred
+        return loss, cond, pred
