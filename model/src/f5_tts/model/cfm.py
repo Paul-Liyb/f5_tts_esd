@@ -330,11 +330,11 @@ class CFM(nn.Module):
         loss = F.mse_loss(pred, flow, reduction="none")
         loss = loss[rand_span_mask]
 
-        pred_2 = self.transformer(
-            x=φ, cond=cond, text=text, time=time, emotion=emotion, drop_audio_cond=drop_audio_cond, drop_text=drop_text, drop_emotion=True, mask=mask, **kwargs
-        )
+        with torch.no_grad():
+            pred_2 = self.transformer(
+                x=φ, cond=cond, text=text, time=time, emotion=emotion, drop_audio_cond=drop_audio_cond, drop_text=drop_text, drop_emotion=True, mask=mask, **kwargs
+            )
 
-        pred_2 = pred_2.detach()
         loss_2 = F.mse_loss(pred_2, flow, reduction="none")
         loss_2 = loss_2[rand_span_mask]
 
