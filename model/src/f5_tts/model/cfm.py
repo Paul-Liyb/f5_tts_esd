@@ -92,7 +92,7 @@ class CFM(nn.Module):
         lens: int["b"] | None = None,
         steps=32,
         cfg_strength=1.0,
-        sway_sampling_coef=None,
+        t_sample_positive=None,
         seed: int | None = None,
         max_duration=4096,
         vocoder: Callable[[float["b d n"]], float["b nw"]] | None = None,
@@ -131,8 +131,8 @@ class CFM(nn.Module):
         # duration
 
         cond_mask = lens_to_mask(lens)
-        if edit_mask is not None:
-            cond_mask = cond_mask & edit_mask
+        # if edit_mask is not None:
+        #     cond_mask = cond_mask & edit_mask
 
         if isinstance(duration, int):
             duration = torch.full((batch,), duration, device=device, dtype=torch.long)
@@ -197,22 +197,8 @@ class CFM(nn.Module):
                 cache=True,
                 **kwargs
             )
-
-            pred_cfg2 = self.transformer(
-                x=x,
-                cond=step_cond,
-                text=text,
-                time=t,
-                mask=mask,
-                drop_audio_cond=False,
-                drop_text=False,
-                drop_emotion=True,
-                emotion=emotion,
-                cache=True,
-                **kwargs
-            )
-            pred, null_pred = torch.chunk(pred_cfg, 2, dim=0)
-            return pred + (pred - null_pred) * cfg_strength + (pred - pred_cfg2)  * 10
+            pred, null_pred, emo_uncond = torch.chunk(pred_cfg, 3, dim=0)
+            return pred + (pred - null_pred) * cfg_strength + (emo_uncond - null_pred) * 10
 
         # noise input
         # to make sure batch inference result is same with different batch size, and for sure single inference
@@ -236,8 +222,8 @@ class CFM(nn.Module):
             t = get_epss_timesteps(steps, device=self.device, dtype=step_cond.dtype)
         else:
             t = torch.linspace(t_start, 1, steps + 1, device=self.device, dtype=step_cond.dtype)
-        if sway_sampling_coef is not None:
-            t = t + sway_sampling_coef * (torch.cos(torch.pi / 2 * t) - 1 + t)
+        if t_sample_positive is not None:
+            t = t + t_sample_positive * (torch.cos(torch.pi / 2 * t) - 1 + t)
 
         trajectory = odeint(fn, y0, t, **self.odeint_kwargs)
         self.transformer.clear_cache()
@@ -306,7 +292,7 @@ class CFM(nn.Module):
         flow = x1 - x0
 
         # only predict what is within the random mask span for infilling
-        cond = torch.where(mask, x1, torch.zeros_like(x1))
+        cond = torch.where(rand_span_mask[..., None], torch.zeros_like(x1), x1)
 
         # transformer and cfg training with a drop rate
         drop_audio_cond = random() < self.audio_drop_prob  # p_drop in voicebox paper
@@ -328,20 +314,20 @@ class CFM(nn.Module):
 
         # flow matching loss
         loss = F.mse_loss(pred, flow, reduction="none")
-        loss = loss[mask]
+        loss = loss[rand_span_mask]
 
-        #  with torch.no_grad():
-        #      pred_2 = self.transformer(
-        #          x=φ, cond=cond, text=text, time=time, emotion=emotion, drop_audio_cond=drop_audio_cond, drop_text=drop_text, drop_emotion=True, mask=mask, **kwargs
-        #      )
+        pred_2 = self.transformer(
+            x=φ, cond=cond, text=text, time=time, emotion=emotion, drop_audio_cond=drop_audio_cond, drop_text=drop_text, drop_emotion=True, mask=mask, **kwargs
+        )
 
-        #  loss_2 = F.mse_loss(pred_2, flow, reduction="none")
-        #  loss_2 = loss_2[mask]
+        pred_2 = pred_2.detach()
+        loss_2 = F.mse_loss(pred_2, flow, reduction="none")
+        loss_2 = loss_2[rand_span_mask]
 
         
-        #  loss_3 = F.mse_loss(pred, pred_2, reduction="none")
-        #  loss_3 = loss_3[mask]
+        loss_3 = F.mse_loss(pred, pred_2, reduction="none")
+        loss_3 = loss_3[rand_span_mask]
 
-        #  loss_total = loss.mean() + loss_2.mean() - loss_3.mean()
+        loss_total = loss.mean() + loss_2.mean() - loss_3.mean()
 
-        return loss, cond, pred
+        return loss_total, cond, pred

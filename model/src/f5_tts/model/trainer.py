@@ -281,7 +281,7 @@ class Trainer:
 
     def train(self, train_dataset: Dataset, num_workers=16, resumable_with_seed: int = None):
         if self.log_samples:
-            from f5_tts.infer.utils_infer import cfg_strength, load_vocoder, nfe_step, sway_sampling_coef
+            from f5_tts.infer.utils_infer import cfg_strength, load_vocoder, nfe_step
 
             vocoder = load_vocoder(
                 vocoder_name=self.vocoder_name, is_local=self.is_local_vocoder, local_path=self.local_vocoder_path
@@ -332,8 +332,6 @@ class Trainer:
         #  which means the length of dataloader calculated before, should consider the number of devices
         num_processes = self.accelerator.num_processes
         warmup_updates = self.num_warmup_updates * num_processes
-        
-        print(f"[DEBUG] num_processes: {num_processes}, warmup_updates: {warmup_updates}")
 
         total_updates = math.ceil(len(train_dataloader) / self.grad_accumulation_steps) * self.epochs
         decay_updates = total_updates - warmup_updates
@@ -471,8 +469,7 @@ class Trainer:
                             emo_map = {"Angry": 0, "Happy": 1, "Neutral": 2, "Sad": 3, "Surprise": 4}
                             
                             for emo_name, emo_id in emo_map.items():
-                                emotion_tensor = batch["emotion"][0]
-                                emotion[:, text_len_1:] = emo_id
+                                emotion_tensor = torch.full((1, nt), fill_value=emo_id, device=self.accelerator.device, dtype=torch.long)
                                 
                                 generated, _ = model_unwrapped.sample(
                                     cond=mel_spec[0][:ref_audio_len].unsqueeze(0),
@@ -480,7 +477,6 @@ class Trainer:
                                     duration=duration,
                                     steps=nfe_step,
                                     cfg_strength=cfg_strength,
-                                    sway_sampling_coef=sway_sampling_coef,
                                     emotion=emotion_tensor,
                                     drop_emotion=False
                                 )

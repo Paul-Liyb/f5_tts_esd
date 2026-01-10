@@ -321,9 +321,13 @@ class DiT(nn.Module):
             x_uncond = self.get_input_embed(
                 x, cond, text, emotion=emotion, drop_audio_cond=True, drop_text=True, drop_emotion=True, cache=cache, audio_mask=mask
             )
-            x = torch.cat((x_cond, x_uncond), dim=0)
-            t = torch.cat((t, t), dim=0)
-            mask = torch.cat((mask, mask), dim=0) if mask is not None else None
+            x_emo_uncond = self.get_input_embed(
+                x, cond, text, emotion=emotion, drop_audio_cond=False, drop_text=False, drop_emotion=True, cache=cache, audio_mask=mask
+            )
+            x = torch.cat((x_cond, x_uncond, x_emo_uncond), dim=0)
+            t = torch.cat((t, t, t), dim=0)
+            mask = torch.cat((mask, mask, mask), dim=0) if mask is not None else None
+
         else:
             x = self.get_input_embed(
                 x, cond, text, emotion=emotion, drop_audio_cond=drop_audio_cond, drop_text=drop_text, drop_emotion=drop_emotion, cache=cache, audio_mask=mask
