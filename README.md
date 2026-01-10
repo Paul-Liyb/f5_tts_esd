@@ -286,13 +286,6 @@ if self.log_samples and self.accelerator.is_local_main_process:
         )
 ```
 
-### 8.2 预期成果
-
-- 实现可控的情感语音合成
-- 保持F5-TTS的零样本语音克隆能力
-- 通过CFG灵活调整情感强度
-- 在ESD数据集上验证效果
-
 ## 九、技术要点总结
 
 ### 9.1 关键创新点
@@ -312,7 +305,7 @@ if self.log_samples and self.accelerator.is_local_main_process:
 | 数据采样 | `src/f5_tts/model/dataset.py` |
 | 训练配置 | `src/f5_tts/configs/F5TTS_ESD_CH.yaml` |
 
-## 十、未来工作方向
+## 十、未来可探索
 
 1. 探索更复杂的情感表示方法（如情感强度、情感混合）
 2. 研究更有效的声纹-情感解耦方法
