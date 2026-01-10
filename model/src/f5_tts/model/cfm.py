@@ -197,8 +197,22 @@ class CFM(nn.Module):
                 cache=True,
                 **kwargs
             )
+
+            pred_cfg2 = self.transformer(
+                x=x,
+                cond=step_cond,
+                text=text,
+                time=t,
+                mask=mask,
+                drop_audio_cond=False,
+                drop_text=False,
+                drop_emotion=True,
+                emotion=emotion,
+                cache=True,
+                **kwargs
+            )
             pred, null_pred = torch.chunk(pred_cfg, 2, dim=0)
-            return pred + (pred - null_pred) * cfg_strength
+            return pred + (pred - null_pred) * cfg_strength + (pred - pred_cfg2)  * 10
 
         # noise input
         # to make sure batch inference result is same with different batch size, and for sure single inference
@@ -292,7 +306,7 @@ class CFM(nn.Module):
         flow = x1 - x0
 
         # only predict what is within the random mask span for infilling
-        cond = torch.where(rand_span_mask[..., None], torch.zeros_like(x1), x1)
+        cond = torch.where(mask, x1, torch.zeros_like(x1))
 
         # transformer and cfg training with a drop rate
         drop_audio_cond = random() < self.audio_drop_prob  # p_drop in voicebox paper
@@ -314,6 +328,20 @@ class CFM(nn.Module):
 
         # flow matching loss
         loss = F.mse_loss(pred, flow, reduction="none")
-        loss = loss[rand_span_mask]
+        loss = loss[mask]
 
-        return loss.mean(), cond, pred
+        #  with torch.no_grad():
+        #      pred_2 = self.transformer(
+        #          x=φ, cond=cond, text=text, time=time, emotion=emotion, drop_audio_cond=drop_audio_cond, drop_text=drop_text, drop_emotion=True, mask=mask, **kwargs
+        #      )
+
+        #  loss_2 = F.mse_loss(pred_2, flow, reduction="none")
+        #  loss_2 = loss_2[mask]
+
+        
+        #  loss_3 = F.mse_loss(pred, pred_2, reduction="none")
+        #  loss_3 = loss_3[mask]
+
+        #  loss_total = loss.mean() + loss_2.mean() - loss_3.mean()
+
+        return loss, cond, pred
