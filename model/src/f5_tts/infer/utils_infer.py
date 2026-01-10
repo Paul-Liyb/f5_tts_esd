@@ -397,7 +397,6 @@ def infer_process(
     fix_duration=fix_duration,
     device=device,
     emotion=torch.tensor([2], device=None),
-    emotion_cfg_scale=1.0,  # Add parameter
 ):
     # Split the input text into batches
     audio, sr = torchaudio.load(ref_audio)
@@ -426,7 +425,6 @@ def infer_process(
             fix_duration=fix_duration,
             device=device,
             emotion=emotion,
-            emotion_cfg_scale=emotion_cfg_scale, # Pass parameter
         )
     )
 
@@ -453,7 +451,6 @@ def infer_batch_process(
     streaming=False,
     chunk_size=2048,
     emotion=torch.tensor([2], device=None),
-    emotion_cfg_scale=1.0, # Add parameter
 ):
     audio, sr = ref_audio
     if audio.shape[0] > 1:
@@ -502,7 +499,6 @@ def infer_batch_process(
                 sway_sampling_coef=sway_sampling_coef,
                 emotion=emotion,
                 drop_emotion=False,
-                emotion_cfg_scale=emotion_cfg_scale, # Pass parameter
             )
             del _
 
