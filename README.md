@@ -13,7 +13,7 @@
 
 ### 1.3 项目结构
 ```
-CODE/test/F5_TTS-Emotion/
+model/
 ├── src/f5_tts/
 │   ├── configs/
 │   │   ├── F5TTS_ESD_CH.yaml    # 中文ESD配置
@@ -30,7 +30,6 @@ CODE/test/F5_TTS-Emotion/
 │       └── infer_cli.py         # 推理接口
 ├── data/
 │   └── ED_EN_CUSTOM/            # 预处理数据
-└── esd/                         # 原始ESD数据集
 ```
 
 ## 二、F5-TTS基础
